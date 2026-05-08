@@ -609,9 +609,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = yaml.load(open(args.training_config, 'r').read(), yaml.Loader)
 
-    # imports Piper for synthetic sample generation
+    # imports Piper for synthetic sample generation. Older piper-sample-generator
+    # layouts had `generate_samples.py` at the repo root; newer ones moved it
+    # into the `piper_sample_generator` package. Try both.
     sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
-    from generate_samples import generate_samples
+    try:
+        from generate_samples import generate_samples  # legacy flat layout
+    except ImportError:
+        from piper_sample_generator.generate_samples import generate_samples  # current packaged layout
 
     # Define output locations
     config["output_dir"] = os.path.abspath(config["output_dir"])
