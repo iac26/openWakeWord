@@ -760,8 +760,10 @@ class Model(nn.Module):
                 g['lr'] = self.lr_warmup_cosine_decay(step_ndx, warmup_steps=warmup_steps, hold=hold_steps,
                                                       total_steps=max_steps, target_lr=lr)
 
-            # zero the parameter gradients
-            self.optimizer.zero_grad()
+            # Note: optimizer.zero_grad() now lives down in the
+            # backward+step block, NOT every iteration. With proper
+            # gradient accumulation we need .grad to persist across
+            # sub-batches; zeroing here would wipe accumulated gradients.
 
             # Get predictions for batch
             predictions = self.model(x)
@@ -791,21 +793,47 @@ class Model(nn.Module):
                     w = w[..., None]
 
             if predictions.shape[0] != 0:
-                # Do backpropagation, with gradient accumulation if the batch-size after selecting high loss examples is too small
+                # Gradient accumulation: when the high-loss filter shrinks the
+                # batch below 128 samples, accumulate gradients across multiple
+                # sub-batches before stepping.
+                #
+                # PRIOR BUG: backward only ran in the else branch, so gradients
+                # from the smaller "accumulating" iterations were silently lost
+                # — only the final sub-batch's gradient (pre-scaled by
+                # 1/accumulation_steps) ever reached the optimizer. That
+                # effectively skipped 2 out of every 3 updates in late-stage
+                # training (where the filter rejects most negatives) and
+                # under-trained phases 2 and 3.
+                #
+                # Correct pattern: backward each sub-batch unscaled (so .grad
+                # holds the SUM of per-sub-batch gradients), then divide by
+                # accumulation_steps before optimizer.step() so the applied
+                # update corresponds to the MEAN gradient — same direction
+                # and magnitude as if we'd seen one large batch. The previous
+                # `loss = loss/accumulation_steps` pre-divide was a partial
+                # attempt at this, but combined with the missed backwards it
+                # produced harmonic-weighted gradient sums, not a true mean.
                 loss = self.loss(predictions, y_ if self.n_classes == 1 else y, w.to(self.device))
-                loss = loss/accumulation_steps
                 accumulated_samples += predictions.shape[0]
 
                 if predictions.shape[0] >= 128:
                     accumulated_predictions = predictions
                     accumulated_labels = y_
+
+                loss.backward()  # raw grads accumulate into .grad
+
                 if accumulated_samples < 128:
                     accumulation_steps += 1
                     accumulated_predictions = torch.cat((accumulated_predictions, predictions))
                     accumulated_labels = torch.cat((accumulated_labels, y_))
                 else:
-                    loss.backward()
+                    if accumulation_steps > 1:
+                        # Average the accumulated gradients across sub-batches
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                p.grad.data.div_(accumulation_steps)
                     self.optimizer.step()
+                    self.optimizer.zero_grad()
                     accumulation_steps = 1
                     accumulated_samples = 0
 
