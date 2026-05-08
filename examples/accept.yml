@@ -1,0 +1,81 @@
+# Training config for the "accept" command word.
+# Usually invoked as a confirmation after a wake word fires.
+# Paths assume install_training.sh + prepare_datasets.py have populated
+# ./training_workspace/ at the repo root. Adjust if your layout differs.
+
+model_name: "accept"
+
+target_phrase:
+  - "accept"
+
+# Single-word commands fire on phonetic neighbours easily — populate this
+# generously. "decline" is included so this model and the decline model
+# don't fire on each other's clips. Add anything you see triggering false
+# positives in practice.
+custom_negative_phrases:
+  - "decline"
+  - "except"
+  - "exempt"
+  - "expect"
+  - "accent"
+  - "ascent"
+  - "aspect"
+  - "kept"
+  - "step"
+  - "set up"
+  - "asleep"
+  - "a step"
+  - "accents"
+
+# Synthetic positives. 100k matches the upstream alexa/hey_mycroft training
+# scale for a single-phrase model. Lower this only if you're tight on GPU
+# time. Going below 30k noticeably hurts recall.
+n_samples: 100000
+n_samples_val: 2000
+
+# tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).
+# augmentation_batch_size MUST stay at 16: torch_audiomentations augment2
+# uses mode="per_batch" (one set of params per batch), so larger batches
+# directly reduce augmentation diversity. Per-clip CPU prep is now
+# pipelined via DataLoader workers, so 16 is no longer a speed bottleneck.
+tts_batch_size: 256
+augmentation_batch_size: 16
+
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+
+background_paths:
+  - "./training_workspace/audioset_16k"
+  # Add ./training_workspace/fma here too if you ran prepare_datasets.py
+  # without --skip-fma (and bump background_paths_duplication_rate accordingly).
+
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+
+augmentation_rounds: 1
+
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+# Upstream defaults. These set per-step gradient batch shape, so changing
+# them changes training dynamics (effective LR, convergence). Leave as-is
+# to keep training behaviour equivalent to upstream openwakeword.
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+
+model_type: "dnn"
+# layer_size 128 matches upstream alexa/hey_mycroft (~214k params, ~830 KB
+# ONNX). n_blocks defaults to 1; upstream models also use n_blocks=1.
+layer_size: 128
+
+# 100k steps lets the larger model fully converge with the larger dataset.
+steps: 100000
+max_negative_weight: 1500
+target_false_positives_per_hour: 0.2
