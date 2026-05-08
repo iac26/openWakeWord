@@ -4,22 +4,40 @@
 
 model_name: "hey_ari"
 
+# Both phrases are accepted wake words. Piper synthesises positives across
+# the list (n_samples is split evenly), and adversarial negatives are
+# generated per-phrase. n_samples is doubled below to keep ~100k positives
+# per variant.
 target_phrase:
   - "hey ari"
+  - "hi ari"
 
-# Add phrases here later if you observe specific false-positive triggers in
-# practice (e.g. "hey aria", "hairy", etc.).
-custom_negative_phrases: []
+# Phrases that sound similar to the wake words but should NOT trigger.
+# Each is synthesised into TTS clips and used as adversarial negatives —
+# the model learns to reject them. Add anything you see triggering
+# false positives in practice.
+custom_negative_phrases:
+  - "hey aria"
+  - "hi aria"
+  - "hey harry"
+  - "hi harry"
+  - "hairy"
+  - "area"
+  - "airy"
+  - "hey area"
+  - "hi area"
 
-# Synthetic positives. 50k is a reasonable middle ground; bump to 100k+ for
-# best accuracy if your GPU has the time.
-n_samples: 50000
-n_samples_val: 2000
+# Synthetic positives. 200k = ~100k per phrase variant, matching the
+# upstream alexa/hey_mycroft per-phrase training scale. Going below ~30k
+# per variant noticeably hurts recall.
+n_samples: 200000
+n_samples_val: 4000
 
 # tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).
-# augmentation_batch_size does NOT — bumping it makes the augment+feature
-# step slower because per-clip CPU prep runs serially and bigger batches
-# leave the GPU idle longer between yields. Stick with 16 (upstream default).
+# augmentation_batch_size MUST stay at 16: torch_audiomentations augment2
+# uses mode="per_batch" (one set of params per batch), so larger batches
+# directly reduce augmentation diversity. Per-clip CPU prep is now
+# pipelined via DataLoader workers, so 16 is no longer a speed bottleneck.
 tts_batch_size: 256
 augmentation_batch_size: 16
 
@@ -52,9 +70,34 @@ batch_n_per_class:
   "adversarial_negative": 50
   "positive": 50
 
-model_type: "dnn"
-layer_size: 32
+model_type: "conv_attention"
+# Conv1D blocks + multi-head self-attention + mean pool over time. Replaces
+# the dnn head's Flatten(16x96)->Linear, which discards the temporal
+# structure of the embedding sequence. Reference: livekit-wakeword
+# (Apache-2.0). On their published "hey livekit" benchmark, conv_attention
+# delivers ~60x lower AUT and ~100x fewer false positives per hour vs
+# the flat dnn head.
+#
+# layer_size is the hidden dimension. 128 with n_heads=4 is a good default;
+# must be divisible by n_heads.
+layer_size: 128
+n_heads: 4
+n_conv: 2     # number of Conv1D(kernel=3) blocks
+n_attn: 1     # number of MultiheadAttention blocks (residual + LayerNorm)
 
-steps: 50000
+# Focal loss focuses gradient on hard examples; gamma=2 is the value from
+# the original paper. Combined with the existing high-loss filter, this
+# pushes more capacity toward the long tail of confusable negatives.
+loss_type: "focal"
+focal_gamma: 2.0
+
+# Embedding mixup: linearly interpolate (x, y) pairs in the pre-computed
+# embedding space at training time. Acts as a regularizer and produces
+# sharper score distributions at inference.
+embedding_mixup: true
+mixup_alpha: 0.2
+
+# 100k steps lets the larger model fully converge with the larger dataset.
+steps: 100000
 max_negative_weight: 1500
 target_false_positives_per_hour: 0.2

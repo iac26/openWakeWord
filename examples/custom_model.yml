@@ -81,12 +81,40 @@ batch_n_per_class:
   "adversarial_negative": 50
   "positive": 50
 
-# Define the type of size of the openwakeword model to train. Increasing the layer size
-# may result in a more capable model, at the cost of decreased inference speed. The default
-# value (32) seems to work well in practice for most wake words/phrases.
+# Define the type and size of the openwakeword model to train.
+#
+# model_type options:
+#   "dnn"             - Flatten(16x96) + Linear stack. Original architecture.
+#                       Smallest model, fastest inference, weakest separation.
+#   "rnn"             - Bidirectional LSTM, takes the last timestep.
+#   "conv_attention"  - Conv1D + multi-head self-attention + mean pool. Same
+#                       (1, 16, 96) input contract; ~10x more params at
+#                       layer_size=128 but dramatically lower false positive
+#                       rate. Reference: livekit-wakeword (Apache-2.0).
+#
+# Conv-attention extras (only used when model_type is "conv_attention"):
+#   n_heads, n_conv, n_attn  - architecture knobs (defaults: 4, 2, 1).
+#   layer_size must be divisible by n_heads.
+#
+# Loss options:
+#   loss_type   - "bce" (default) or "focal". Focal loss focuses gradient on
+#                 hard examples; gamma=2 is the value from the original paper.
+#   focal_gamma - exponent for the (1-p_t)**gamma down-weighting (default 2.0).
+#
+# Regularization options:
+#   embedding_mixup - if true, linearly interpolates (x, y) pairs in the
+#                     pre-computed embedding space at training time.
+#   mixup_alpha     - Beta(alpha, alpha) sampling parameter (default 0.2).
 
 model_type: "dnn"
 layer_size: 32
+# n_heads: 4
+# n_conv: 2
+# n_attn: 1
+# loss_type: "bce"
+# focal_gamma: 2.0
+# embedding_mixup: false
+# mixup_alpha: 0.2
 
 # Define training parameters. The values below are recommended defaults for most applications,
 # but unique deployment environments will likely require testing to determine which values

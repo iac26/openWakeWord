@@ -575,6 +575,60 @@ def apply_reverb(x, rir_files):
 
 
 # Alternate data augmentation method using audiomentations library (https://pypi.org/project/audiomentations/)
+class _PerClipAugDataset(torch.utils.data.Dataset):
+    """Per-clip CPU prep: load wav, pad/truncate to total_length, run
+    audiomentations.Compose. The Compose object is built lazily so each
+    DataLoader worker gets its own (set up in worker_init_fn) with
+    independently seeded RNG."""
+
+    def __init__(self, clip_paths, total_length, sr, aug_probs):
+        self.clip_paths = clip_paths
+        self.total_length = total_length
+        self.sr = sr
+        self.aug_probs = aug_probs
+        self._compose = None
+
+    def __len__(self):
+        return len(self.clip_paths)
+
+    def _ensure_compose(self):
+        if self._compose is None:
+            self._compose = audiomentations.Compose([
+                audiomentations.SevenBandParametricEQ(
+                    min_gain_db=-6, max_gain_db=6,
+                    p=self.aug_probs["SevenBandParametricEQ"]),
+                audiomentations.TanhDistortion(
+                    min_distortion=0.0001, max_distortion=0.10,
+                    p=self.aug_probs["TanhDistortion"]),
+            ])
+
+    def __getitem__(self, idx):
+        self._ensure_compose()
+        clip_data, clip_sr = torchaudio.load(self.clip_paths[idx])
+        if clip_sr != self.sr:
+            raise ValueError("Error! Clip does not have the correct sample rate!")
+        clip_data = clip_data[0]
+        if clip_data.shape[0] > self.total_length:
+            clip_data = clip_data[:self.total_length]
+        clip_data = create_fixed_size_clip(clip_data, self.total_length, clip_sr)
+        samples = np.asarray(clip_data, dtype=np.float32)
+        return self._compose(samples=samples, sample_rate=self.sr)
+
+
+def _augment_worker_init(worker_id):
+    info = torch.utils.data.get_worker_info()
+    ds = info.dataset
+    ds._compose = None
+    ds._ensure_compose()
+    seed = (torch.initial_seed() + worker_id) % (2**32)
+    np.random.seed(seed)
+    random.seed(seed)
+
+
+def _augment_collate(batch):
+    return torch.from_numpy(np.stack(batch, axis=0))
+
+
 def augment_clips(
         clip_paths: List[str],
         total_length: int,
@@ -686,41 +740,48 @@ def augment_clips(
             torch_audiomentations.Gain(max_gain_in_db=0, p=augmentation_probabilities["Gain"]),
         ])
 
-    # Iterate through all clips and augment them. The per-clip CPU loop is
-    # serial: previously tried a ThreadPool here but it made things worse,
-    # likely due to shared random state in the audiomentations.Compose
-    # object. Keep this serial; the GPU augment2 + ONNX embedding stages
-    # run as a single batched call below.
-    for i in range(0, len(clip_paths), batch_size):
-        batch = clip_paths[i:i+batch_size]
-        augmented_clips = []
-        for clip in batch:
-            clip_data, clip_sr = torchaudio.load(clip)
-            clip_data = clip_data[0]
-            if clip_data.shape[0] > total_length:
-                clip_data = clip_data[0:total_length]
+    # Per-clip CPU prep (load + pad + audiomentations.Compose) was the
+    # bottleneck. Run it across a small DataLoader worker pool while the
+    # main thread runs augment2 on GPU + reverb. Each worker owns its own
+    # Compose and seeded RNG, so per-clip augmentation distribution is
+    # identical to the serial loop in expectation. augment2 still receives
+    # exactly `batch_size` clips so its mode="per_batch" semantics are
+    # preserved. `augment1` (defined above) is intentionally unused — kept
+    # for clarity that the same composition is built per-worker inside
+    # _PerClipAugDataset.
+    del augment1
+    n_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+    dataset = _PerClipAugDataset(
+        clip_paths=clip_paths,
+        total_length=total_length,
+        sr=sr,
+        aug_probs=augmentation_probabilities,
+    )
+    loader_kwargs = dict(
+        dataset=dataset,
+        batch_size=batch_size,
+        num_workers=n_workers,
+        collate_fn=_augment_collate,
+        drop_last=False,
+    )
+    if n_workers > 0:
+        loader_kwargs["worker_init_fn"] = _augment_worker_init
+        loader_kwargs["prefetch_factor"] = 4
+        loader_kwargs["persistent_workers"] = False
+    loader = torch.utils.data.DataLoader(**loader_kwargs)
 
-            if clip_sr != sr:
-                raise ValueError("Error! Clip does not have the correct sample rate!")
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    for batch in loader:
+        augmented_batch = augment2(
+            samples=batch.unsqueeze(1).to(device),
+            sample_rate=sr,
+        ).squeeze(1)
 
-            clip_data = create_fixed_size_clip(clip_data, total_length, clip_sr)
-
-            # audiomentations expects float32 numpy; torchaudio.load gives
-            # float32 tensors but downstream slicing can promote to float64.
-            samples = np.asarray(clip_data, dtype=np.float32)
-            augmented_clips.append(torch.from_numpy(augment1(samples=samples, sample_rate=sr)))
-
-        # Do second pass augmentations
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        augmented_batch = augment2(samples=torch.vstack(augmented_clips).unsqueeze(dim=1).to(device), sample_rate=sr).squeeze(axis=1)
-
-        # Do reverberation
         if augmentation_probabilities["RIR"] >= np.random.random() and RIR_paths != []:
-            rir_waveform, sr = torchaudio.load(random.choice(RIR_paths))
+            rir_waveform, _ = torchaudio.load(random.choice(RIR_paths))
             augmented_batch = reverberate(augmented_batch.cpu(), rir_waveform, rescale_amp="avg")
 
-        # yield batch of 16-bit PCM audio data
-        yield (augmented_batch.cpu().numpy()*32767).astype(np.int16)
+        yield (augmented_batch.cpu().numpy() * 32767).astype(np.int16)
 
 
 def create_fixed_size_clip(x, n_samples, sr=16000, start=None, end_jitter=.200):
