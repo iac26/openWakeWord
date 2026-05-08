@@ -812,13 +812,12 @@ if __name__ == '__main__':
     negative_test_output_dir = os.path.join(config["output_dir"], config["model_name"], "negative_test")
     feature_save_dir = os.path.join(config["output_dir"], config["model_name"])
 
-    # Get paths for impulse response and background audio files
-    rir_paths = [i.path for j in config["rir_paths"] for i in os.scandir(j)]
-    background_paths = []
-    if len(config["background_paths_duplication_rate"]) != len(config["background_paths"]):
-        config["background_paths_duplication_rate"] = [1]*len(config["background_paths"])
-    for background_path, duplication_rate in zip(config["background_paths"], config["background_paths_duplication_rate"]):
-        background_paths.extend([i.path for i in os.scandir(background_path)]*duplication_rate)
+    # RIR + background audio paths are only consumed during the
+    # --augment_clips step. Resolved lazily inside that branch so users who
+    # already have computed feature .npy files can run --train_model alone
+    # without needing mit_rirs / audioset on disk.
+    rir_paths = None
+    background_paths = None
 
     if args.generate_clips is True:
         # Generate positive clips for training
@@ -925,6 +924,15 @@ if __name__ == '__main__':
 
     # Do Data Augmentation
     if args.augment_clips is True:
+        # Resolve RIR + background paths now (skipped at startup so that
+        # --train_model alone doesn't require these directories on disk).
+        rir_paths = [i.path for j in config["rir_paths"] for i in os.scandir(j)]
+        background_paths = []
+        if len(config["background_paths_duplication_rate"]) != len(config["background_paths"]):
+            config["background_paths_duplication_rate"] = [1]*len(config["background_paths"])
+        for background_path, duplication_rate in zip(config["background_paths"], config["background_paths_duplication_rate"]):
+            background_paths.extend([i.path for i in os.scandir(background_path)]*duplication_rate)
+
         if not os.path.exists(os.path.join(feature_save_dir, "positive_features_train.npy")) or args.overwrite is True:
             positive_clips_train = [str(i) for i in Path(positive_train_output_dir).glob("*.wav")]*config["augmentation_rounds"]
             positive_clips_train_generator = augment_clips(positive_clips_train, total_length=config["total_length"],
