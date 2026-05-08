@@ -658,14 +658,24 @@ class Model(nn.Module):
                 self.history["positive_test_clips_recall"].append(tp/(tp + fn))
 
             if step_ndx in val_steps and step_ndx > 1 and X_val is not None:
-                # Get metrics for balanced test examples of positive and negative clips
+                # Concatenate predictions/labels across batches before
+                # computing metrics. The original code overwrote val_recall /
+                # val_acc / val_fp each iteration; that was harmless when
+                # X_val ran in a single huge batch, but breaks now that we
+                # cap the val batch size to keep MultiheadAttention's CUDA
+                # SDPA kernel from crashing.
+                all_preds = []
+                all_labels = []
                 for val_step_ndx, data in enumerate(X_val):
                     with torch.no_grad():
                         x_val, y_val = data[0].to(self.device), data[1].to(self.device)
-                        val_predictions = self.model(x_val)
-                        val_recall = self.recall(val_predictions, y_val[..., None]).detach().cpu().numpy()
-                        val_acc = self.accuracy(val_predictions, y_val[..., None].to(torch.int64))
-                        val_fp = self.fp(val_predictions, y_val[..., None])
+                        all_preds.append(self.model(x_val))
+                        all_labels.append(y_val)
+                all_preds = torch.cat(all_preds)
+                all_labels = torch.cat(all_labels)
+                val_recall = self.recall(all_preds, all_labels[..., None]).detach().cpu().numpy()
+                val_acc = self.accuracy(all_preds, all_labels[..., None].to(torch.int64))
+                val_fp = self.fp(all_preds, all_labels[..., None])
                 self.history["val_accuracy"].append(val_acc.detach().cpu().numpy())
                 self.history["val_recall"].append(val_recall)
                 self.history["val_n_fp"].append(val_fp.detach().cpu().numpy())
@@ -1000,12 +1010,22 @@ if __name__ == '__main__':
             num_workers=0,
         )
 
+        # Validation DataLoaders: cap batch_size at 256. Previously these
+        # used batch_size=len(labels), pushing the entire validation set
+        # (up to ~hundreds of thousands of windows for X_val_fp) through
+        # one model.forward call. The dnn head tolerated that; the
+        # conv_attention head's MultiheadAttention crashes the CUDA SDPA
+        # kernel with "invalid configuration argument" at large B (the
+        # specific kernel-launch limit varies per GPU). 256 is well under
+        # any backend limit and the val loop accumulates across batches.
+        VAL_BATCH = 256
+
         X_val_fp = np.load(config["false_positive_validation_data_path"])
         X_val_fp = np.array([X_val_fp[i:i+input_shape[0]] for i in range(0, X_val_fp.shape[0]-input_shape[0], 1)])  # reshape to match model
         X_val_fp_labels = np.zeros(X_val_fp.shape[0]).astype(np.float32)
         X_val_fp = torch.utils.data.DataLoader(
             torch.utils.data.TensorDataset(torch.from_numpy(X_val_fp), torch.from_numpy(X_val_fp_labels)),
-            batch_size=len(X_val_fp_labels)
+            batch_size=VAL_BATCH
         )
 
         X_val_pos = np.load(os.path.join(feature_save_dir, "positive_features_test.npy"))
@@ -1017,7 +1037,7 @@ if __name__ == '__main__':
                 torch.from_numpy(np.vstack((X_val_pos, X_val_neg))),
                 torch.from_numpy(labels)
                 ),
-            batch_size=len(labels)
+            batch_size=VAL_BATCH
         )
 
         # Run auto training
