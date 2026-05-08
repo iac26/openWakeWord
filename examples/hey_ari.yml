@@ -27,10 +27,10 @@ rir_paths:
 
 background_paths:
   - "./training_workspace/audioset_16k"
-  - "./training_workspace/fma"
+  # Add ./training_workspace/fma here too if you ran prepare_datasets.py
+  # without --skip-fma (and bump background_paths_duplication_rate accordingly).
 
 background_paths_duplication_rate:
-  - 1
   - 1
 
 false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"

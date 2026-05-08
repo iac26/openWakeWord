@@ -613,6 +613,16 @@ if __name__ == '__main__':
     # layouts had `generate_samples.py` at the repo root; newer ones moved it
     # into the `piper_sample_generator` package. Try both.
     sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
+
+    # PyTorch 2.6+ changed torch.load to default weights_only=True, which
+    # rejects piper's checkpoint (it pickles custom SynthesizerTrn classes).
+    # Patch the default back to False so generate_samples can load the model.
+    _orig_torch_load = torch.load
+    def _torch_load_compat(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _torch_load_compat  # type: ignore[assignment]
+
     try:
         from generate_samples import generate_samples  # legacy flat layout
     except ImportError:

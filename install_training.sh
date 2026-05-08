@@ -68,12 +68,14 @@ else
     fi
 fi
 
-# 3. PyTorch (must be installed before extras to pick the right CUDA wheel) --
-echo "==> Installing PyTorch ($CUDA)"
+# 3. PyTorch + torchaudio (must be <2.6: torch>=2.6 changed torch.load
+# default to weights_only=True which rejects piper's checkpoint, and
+# torchaudio>=2.9 removed `.info()` which torch_audiomentations needs).
+echo "==> Installing PyTorch ($CUDA, torch<2.6)"
 if [[ "$CUDA" == "cpu" ]]; then
-    "${PIP[@]}" --index-url https://download.pytorch.org/whl/cpu torch torchaudio
+    "${PIP[@]}" --index-url https://download.pytorch.org/whl/cpu "torch<2.6" "torchaudio<2.6"
 else
-    "${PIP[@]}" --index-url "https://download.pytorch.org/whl/$CUDA" torch torchaudio
+    "${PIP[@]}" --index-url "https://download.pytorch.org/whl/$CUDA" "torch<2.6" "torchaudio<2.6"
 fi
 
 # 4. openWakeWord + training extras -----------------------------------------
@@ -109,12 +111,14 @@ if [[ "$DOWNLOAD_PIPER" == "1" ]]; then
         # openwakeword's train.py expects (rhasspy's was restructured).
         git clone --depth 1 https://github.com/dscripka/piper-sample-generator "$PIPER_DIR"
     fi
-    PIPER_VOICE="$PIPER_DIR/models/en_US-libritts_r-medium.pt"
+    # dscripka's fork expects the v1.0.0 LibriTTS model. The v2.0.0 medium
+    # checkpoint from the rhasspy main repo doesn't load with this fork.
+    PIPER_VOICE="$PIPER_DIR/models/en-us-libritts-high.pt"
     if [[ ! -s "$PIPER_VOICE" ]]; then
-        echo "==> Downloading Piper voice model (~600 MB)"
+        echo "==> Downloading Piper voice model (~250 MB)"
         mkdir -p "$PIPER_DIR/models"
         wget -q --show-progress -O "$PIPER_VOICE" \
-            "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt"
+            "https://github.com/rhasspy/piper-sample-generator/releases/download/v1.0.0/en-us-libritts-high.pt"
     fi
 fi
 

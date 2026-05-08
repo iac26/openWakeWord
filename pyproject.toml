@@ -43,13 +43,21 @@ test = [
 # install separately if you need it.
 training = [
     "mutagen>=1.46.0,<2",
-    "torch>=2.0,<3",
-    "torchaudio>=2.0,<3",
+    # torch>=2.6 changed `torch.load` default to weights_only=True, which
+    # rejects piper-sample-generator's pickled SynthesizerTrn checkpoint;
+    # torchaudio>=2.9 removed `torchaudio.info` (used by torch_audiomentations
+    # and openwakeword/data.py) and routes `torchaudio.load` through torchcodec.
+    # Pinning <2.6 avoids both regressions; bumping requires patching upstream.
+    "torch>=2.0,<2.6",
+    "torchaudio>=2.0,<2.6",
     "torchinfo>=1.8.0,<2",
     "torchmetrics>=1.0,<2",
     "speechbrain>=1.0,<2",
     "audiomentations>=0.33.0,<1",
-    "torch-audiomentations>=0.11.0,<1",
+    # torch-audiomentations 0.12 changes Compose default output_type from
+    # 'tensor' to 'dict' — breaks our usage silently. Pin <0.12 until we
+    # explicitly migrate.
+    "torch-audiomentations>=0.11.0,<0.12",
     "tqdm>=4.64.0,<5",
     "pyyaml>=6.0.1,<7",
     "pronouncing>=0.2.0,<1",

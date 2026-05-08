@@ -701,8 +701,11 @@ def augment_clips(
 
             clip_data = create_fixed_size_clip(clip_data, total_length, clip_sr)
 
-            # Do first pass augmentations
-            augmented_clips.append(torch.from_numpy(augment1(samples=clip_data, sample_rate=sr)))
+            # Do first pass augmentations. audiomentations expects float32
+            # numpy; torchaudio.load gives float32 tensors but downstream slicing
+            # can promote to float64, so cast explicitly.
+            samples = np.asarray(clip_data, dtype=np.float32)
+            augmented_clips.append(torch.from_numpy(augment1(samples=samples, sample_rate=sr)))
 
         # Do second pass augmentations
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
