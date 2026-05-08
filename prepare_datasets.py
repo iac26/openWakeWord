@@ -9,22 +9,19 @@ Outputs (under --workdir, default ./training_workspace):
     audioset_16k/            AudioSet resampled to 16 kHz wav
     fma/                     FMA "small" clips resampled to 16 kHz wav
 
-We deliberately bypass `datasets.Audio(sampling_rate=...)` so that resampling
-does NOT go through torchcodec — torchcodec is brittle on hosts whose ffmpeg
-shared libraries don't match the wheel ABI (Ubuntu 22.04 ships libavutil.so.56,
-torchcodec wheels expect 57/58/59/60). We use `librosa.load` instead, which
-falls back to soundfile (wav/flac) and the ffmpeg binary (mp3) on disk.
-
-Run AFTER `install_training.sh` has installed the `[training]` extra
-(this script needs `datasets`, `librosa`, `soundfile`, `scipy`, `tqdm`, `numpy`).
+Avoids `datasets.Audio(...)` (which pulls in torchcodec / has fragile bytes
+handling under streaming) and `datasets.load_dataset(streaming=True)`. Files
+are pulled directly via `huggingface_hub.snapshot_download` and decoded with
+`librosa.load` (which uses soundfile for wav/flac and the ffmpeg binary for
+mp3).
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -40,11 +37,11 @@ log = logging.getLogger("prepare_datasets")
 TARGET_SR = 16000
 
 
-def _resample_to_16k(buf_or_path) -> np.ndarray:
-    """Decode an audio file (path or BytesIO) to mono 16 kHz float32."""
+def _resample_to_16k(path) -> np.ndarray:
+    """Decode an audio file (path) to mono 16 kHz float32."""
     import librosa
 
-    arr, _ = librosa.load(buf_or_path, sr=TARGET_SR, mono=True)
+    arr, _ = librosa.load(str(path), sr=TARGET_SR, mono=True)
     return arr
 
 
@@ -53,24 +50,33 @@ def _write_wav16(path: Path, arr: np.ndarray) -> None:
 
 
 def download_mit_rirs(out_dir: Path) -> None:
-    import datasets
+    """Download MIT IR Survey from HuggingFace (already 16 kHz wav, just copy)."""
+    from huggingface_hub import snapshot_download
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    log.info("MIT RIRs -> %s (streaming from HuggingFace, decoding locally)", out_dir)
-    ds = datasets.load_dataset(
-        "davidscripka/MIT_environmental_impulse_responses",
-        split="train",
-        streaming=True,
-    )
-    # decode=False -> raw bytes, skips torchcodec entirely
-    ds = ds.cast_column("audio", datasets.Audio(decode=False))
-    for row in tqdm(ds, desc="mit_rirs"):
-        name = Path(row["audio"]["path"]).name
-        target = out_dir / name
-        if target.exists():
+    log.info("MIT RIRs -> %s (snapshot_download from HuggingFace)", out_dir)
+
+    cache_dir = Path(snapshot_download(
+        repo_id="davidscripka/MIT_environmental_impulse_responses",
+        repo_type="dataset",
+        allow_patterns=["16khz/*", "data/*"],
+    ))
+
+    # Repo layout has audio under 16khz/ (and sometimes data/)
+    src_files: list[Path] = []
+    for sub in ("16khz", "data"):
+        src_files.extend((cache_dir / sub).rglob("*.wav") if (cache_dir / sub).exists() else [])
+    if not src_files:
+        log.warning("No .wav files found under %s", cache_dir)
+        return
+
+    log.info("Copying %d RIR files -> %s", len(src_files), out_dir)
+    for src in tqdm(src_files, desc="mit_rirs"):
+        target = out_dir / src.name
+        if target.exists() and target.stat().st_size > 0:
             continue
-        arr = _resample_to_16k(io.BytesIO(row["audio"]["bytes"]))
-        _write_wav16(target, arr)
+        # Already 16 kHz mono wav per the dataset; copy as-is.
+        shutil.copyfile(src, target)
 
 
 def download_audioset(workdir: Path, shards: list[str]) -> None:
@@ -110,37 +116,91 @@ def download_audioset(workdir: Path, shards: list[str]) -> None:
         target = out_dir / (flac_path.stem + ".wav")
         if target.exists():
             continue
-        arr = _resample_to_16k(str(flac_path))
+        arr = _resample_to_16k(flac_path)
         _write_wav16(target, arr)
 
 
 def download_fma(out_dir: Path, n_hours: float) -> None:
-    """Download FMA "small" clips (HF streaming) and resample to 16 kHz wav.
+    """Download FMA "small" subset and resample to 16 kHz wav.
 
-    FMA "small" clips are 30 s each, so n_clips = n_hours * 3600 / 30.
+    Pulls mp3 audio files from the HF mirror `rudraml/fma` (config "small").
+    FMA small clips are ~30 s each, so n_clips = n_hours * 3600 / 30.
     """
-    import datasets
+    from huggingface_hub import snapshot_download
 
     out_dir.mkdir(parents=True, exist_ok=True)
     n_clips = int(n_hours * 3600 / 30)
-    log.info("FMA -> %s (%d clips, ~%.1f hours)", out_dir, n_clips, n_hours)
+    log.info("FMA -> %s (target %d clips, ~%.1f hours)", out_dir, n_clips, n_hours)
 
-    ds = datasets.load_dataset("rudraml/fma", name="small", split="train", streaming=True)
-    ds = ds.cast_column("audio", datasets.Audio(decode=False))
-    it = iter(ds)
+    log.info("Pulling FMA small subset from HuggingFace (this can be ~7 GB)")
+    cache_dir = Path(snapshot_download(
+        repo_id="rudraml/fma",
+        repo_type="dataset",
+        allow_patterns=["fma_small/*", "small/*", "*.mp3"],
+    ))
 
-    for i in tqdm(range(n_clips), desc="fma"):
-        try:
-            row = next(it)
-        except StopIteration:
-            log.warning("FMA stream exhausted after %d clips", i)
-            break
-        name = Path(row["audio"]["path"]).name.replace(".mp3", ".wav")
-        target = out_dir / name
+    mp3s = sorted(cache_dir.rglob("*.mp3"))
+    if not mp3s:
+        log.warning("No .mp3 files found under %s — checking for parquet shards.", cache_dir)
+        # Fall back: dataset may be stored as parquet with embedded audio
+        _download_fma_via_parquet(cache_dir, out_dir, n_clips)
+        return
+
+    mp3s = mp3s[:n_clips]
+    log.info("Resampling %d FMA mp3s -> %s", len(mp3s), out_dir)
+    for mp3_path in tqdm(mp3s, desc="fma"):
+        target = out_dir / (mp3_path.stem + ".wav")
         if target.exists():
             continue
-        arr = _resample_to_16k(io.BytesIO(row["audio"]["bytes"]))
+        try:
+            arr = _resample_to_16k(mp3_path)
+        except Exception as e:  # corrupt mp3, skip
+            log.warning("Skipping %s: %s", mp3_path.name, e)
+            continue
         _write_wav16(target, arr)
+
+
+def _download_fma_via_parquet(cache_dir: Path, out_dir: Path, n_clips: int) -> None:
+    """Fallback path when FMA repo stores audio as parquet shards with bytes."""
+    import io
+
+    import pyarrow.parquet as pq
+
+    parquets = sorted(cache_dir.rglob("*.parquet"))
+    if not parquets:
+        log.error("No mp3s and no parquets found in %s; cannot prepare FMA.", cache_dir)
+        return
+
+    written = 0
+    pbar = tqdm(total=n_clips, desc="fma")
+    for pq_path in parquets:
+        if written >= n_clips:
+            break
+        table = pq.read_table(pq_path)
+        # Expect an 'audio' column of struct<bytes: binary, path: string>
+        col = table.column("audio").to_pylist()
+        for entry in col:
+            if written >= n_clips:
+                break
+            audio_bytes = entry.get("bytes") if isinstance(entry, dict) else None
+            audio_path = entry.get("path") if isinstance(entry, dict) else None
+            if not audio_bytes:
+                continue
+            name = (Path(audio_path).stem if audio_path else f"clip_{written}") + ".wav"
+            target = out_dir / name
+            if target.exists():
+                written += 1
+                pbar.update(1)
+                continue
+            try:
+                arr = _resample_to_16k(io.BytesIO(audio_bytes))
+            except Exception as e:
+                log.warning("Skipping clip %d: %s", written, e)
+                continue
+            _write_wav16(target, arr)
+            written += 1
+            pbar.update(1)
+    pbar.close()
 
 
 def main() -> int:
