@@ -94,4 +94,4 @@ steps: 100000
 
 # Loosened negative pressure: see hey_ari.yml.
 max_negative_weight: 750
-target_false_positives_per_hour: 0.5
+target_false_positives_per_hour: 1.0
