@@ -337,6 +337,14 @@ class Model(nn.Module):
         Returns:
             list: A list of the top n models
         """
+        # Force every saved checkpoint into eval mode before we score it.
+        # Deep-copies were taken during training while the model was in
+        # train mode, so without this, model(x_val) below uses BatchNorm's
+        # batch statistics from the val batch instead of running stats —
+        # which gave wrong FP rates and tainted the selection.
+        for model in self.best_models:
+            model.eval()
+
         # Get false positive rates for each model. Single tqdm over batches:
         # the previous structure put tqdm on the inner model loop, which
         # restarted the bar for every batch and looked like an infinite
