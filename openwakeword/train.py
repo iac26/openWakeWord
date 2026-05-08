@@ -780,25 +780,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = yaml.load(open(args.training_config, 'r').read(), yaml.Loader)
 
-    # imports Piper for synthetic sample generation. Older piper-sample-generator
-    # layouts had `generate_samples.py` at the repo root; newer ones moved it
-    # into the `piper_sample_generator` package. Try both.
-    sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
-
-    # PyTorch 2.6+ changed torch.load to default weights_only=True, which
-    # rejects piper's checkpoint (it pickles custom SynthesizerTrn classes).
-    # Patch the default back to False so generate_samples can load the model.
-    _orig_torch_load = torch.load
-    def _torch_load_compat(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
-        return _orig_torch_load(*args, **kwargs)
-    torch.load = _torch_load_compat  # type: ignore[assignment]
-
-    try:
-        from generate_samples import generate_samples  # legacy flat layout
-    except ImportError:
-        from piper_sample_generator.generate_samples import generate_samples  # current packaged layout
-
     # Define output locations
     config["output_dir"] = os.path.abspath(config["output_dir"])
     if not os.path.exists(config["output_dir"]):
@@ -820,6 +801,25 @@ if __name__ == '__main__':
     background_paths = None
 
     if args.generate_clips is True:
+        # Piper TTS is only needed for synthetic clip generation. Imported
+        # lazily so --train_model alone (with .npy features already on disk)
+        # doesn't require piper-sample-generator to be installed.
+        sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
+
+        # PyTorch 2.6+ changed torch.load to default weights_only=True, which
+        # rejects piper's checkpoint (it pickles custom SynthesizerTrn classes).
+        # Patch the default back to False so generate_samples can load the model.
+        _orig_torch_load = torch.load
+        def _torch_load_compat(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _orig_torch_load(*args, **kwargs)
+        torch.load = _torch_load_compat  # type: ignore[assignment]
+
+        try:
+            from generate_samples import generate_samples  # legacy flat layout
+        except ImportError:
+            from piper_sample_generator.generate_samples import generate_samples  # current packaged layout
+
         # Generate positive clips for training
         logging.info("#"*50 + "\nGenerating positive clips for training\n" + "#"*50)
         if not os.path.exists(positive_train_output_dir):
@@ -907,21 +907,6 @@ if __name__ == '__main__':
         else:
             logging.warning(f"Skipping generation of negative clips for testing, as ~{config['n_samples_val']} already exist")
 
-    # Set the total length of the training clips based on the ~median generated clip duration, rounding to the nearest 1000 samples
-    # and setting to 32000 when the median + 750 ms is close to that, as it's a good default value
-    n = 50  # sample size
-    positive_clips = [str(i) for i in Path(positive_test_output_dir).glob("*.wav")]
-    duration_in_samples = []
-    for i in range(n):
-        sr, dat = scipy.io.wavfile.read(positive_clips[np.random.randint(0, len(positive_clips))])
-        duration_in_samples.append(len(dat))
-
-    config["total_length"] = int(round(np.median(duration_in_samples)/1000)*1000) + 12000  # add 750 ms to clip duration as buffer
-    if config["total_length"] < 32000:
-        config["total_length"] = 32000  # set a minimum of 32000 samples (2 seconds)
-    elif abs(config["total_length"] - 32000) <= 4000:
-        config["total_length"] = 32000
-
     # Do Data Augmentation
     if args.augment_clips is True:
         # Resolve RIR + background paths now (skipped at startup so that
@@ -932,6 +917,23 @@ if __name__ == '__main__':
             config["background_paths_duplication_rate"] = [1]*len(config["background_paths"])
         for background_path, duplication_rate in zip(config["background_paths"], config["background_paths_duplication_rate"]):
             background_paths.extend([i.path for i in os.scandir(background_path)]*duplication_rate)
+
+        # Set the total length of the training clips based on the ~median
+        # generated clip duration, rounded to the nearest 1000 samples; 32000
+        # samples (2s) is treated as a default snap point. Only used by the
+        # augment_clips pipeline below, so it's computed inside this branch.
+        n = 50  # sample size
+        positive_clips = [str(i) for i in Path(positive_test_output_dir).glob("*.wav")]
+        duration_in_samples = []
+        for i in range(n):
+            sr, dat = scipy.io.wavfile.read(positive_clips[np.random.randint(0, len(positive_clips))])
+            duration_in_samples.append(len(dat))
+
+        config["total_length"] = int(round(np.median(duration_in_samples)/1000)*1000) + 12000  # add 750 ms to clip duration as buffer
+        if config["total_length"] < 32000:
+            config["total_length"] = 32000  # set a minimum of 32000 samples (2 seconds)
+        elif abs(config["total_length"] - 32000) <= 4000:
+            config["total_length"] = 32000
 
         if not os.path.exists(os.path.join(feature_save_dir, "positive_features_train.npy")) or args.overwrite is True:
             positive_clips_train = [str(i) for i in Path(positive_train_output_dir).glob("*.wav")]*config["augmentation_rounds"]
@@ -993,7 +995,6 @@ if __name__ == '__main__':
 
     # Create openwakeword model
     if args.train_model is True:
-        F = openwakeword.utils.AudioFeatures(device='cpu')
         input_shape = np.load(os.path.join(feature_save_dir, "positive_features_test.npy")).shape[1:]
 
         oww = Model(
