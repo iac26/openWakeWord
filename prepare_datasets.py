@@ -9,13 +9,20 @@ Outputs (under --workdir, default ./training_workspace):
     audioset_16k/            AudioSet resampled to 16 kHz wav
     fma/                     FMA "small" clips resampled to 16 kHz wav
 
+We deliberately bypass `datasets.Audio(sampling_rate=...)` so that resampling
+does NOT go through torchcodec — torchcodec is brittle on hosts whose ffmpeg
+shared libraries don't match the wheel ABI (Ubuntu 22.04 ships libavutil.so.56,
+torchcodec wheels expect 57/58/59/60). We use `librosa.load` instead, which
+falls back to soundfile (wav/flac) and the ffmpeg binary (mp3) on disk.
+
 Run AFTER `install_training.sh` has installed the `[training]` extra
-(this script needs `datasets`, `scipy`, `tqdm`, `numpy`).
+(this script needs `datasets`, `librosa`, `soundfile`, `scipy`, `tqdm`, `numpy`).
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import os
 import subprocess
@@ -30,27 +37,40 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("prepare_datasets")
 
+TARGET_SR = 16000
 
-def _write_wav(path: Path, sr: int, arr: np.ndarray) -> None:
-    scipy.io.wavfile.write(path, sr, (np.asarray(arr) * 32767).astype(np.int16))
+
+def _resample_to_16k(buf_or_path) -> np.ndarray:
+    """Decode an audio file (path or BytesIO) to mono 16 kHz float32."""
+    import librosa
+
+    arr, _ = librosa.load(buf_or_path, sr=TARGET_SR, mono=True)
+    return arr
+
+
+def _write_wav16(path: Path, arr: np.ndarray) -> None:
+    scipy.io.wavfile.write(path, TARGET_SR, (np.asarray(arr) * 32767).astype(np.int16))
 
 
 def download_mit_rirs(out_dir: Path) -> None:
     import datasets
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    log.info("MIT RIRs -> %s (streaming from HuggingFace)", out_dir)
+    log.info("MIT RIRs -> %s (streaming from HuggingFace, decoding locally)", out_dir)
     ds = datasets.load_dataset(
         "davidscripka/MIT_environmental_impulse_responses",
         split="train",
         streaming=True,
     )
+    # decode=False -> raw bytes, skips torchcodec entirely
+    ds = ds.cast_column("audio", datasets.Audio(decode=False))
     for row in tqdm(ds, desc="mit_rirs"):
         name = Path(row["audio"]["path"]).name
         target = out_dir / name
         if target.exists():
             continue
-        _write_wav(target, 16000, row["audio"]["array"])
+        arr = _resample_to_16k(io.BytesIO(row["audio"]["bytes"]))
+        _write_wav16(target, arr)
 
 
 def download_audioset(workdir: Path, shards: list[str]) -> None:
@@ -60,8 +80,6 @@ def download_audioset(workdir: Path, shards: list[str]) -> None:
     multiple shards (or the full balanced+unbalanced set) — they cover ~50 GB+.
     Browse names at https://huggingface.co/datasets/agkphysics/AudioSet/tree/main/data.
     """
-    import datasets
-
     raw_dir = workdir / "audioset"
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir = workdir / "audioset_16k"
@@ -82,20 +100,18 @@ def download_audioset(workdir: Path, shards: list[str]) -> None:
         with tarfile.open(tar_path) as tf:
             tf.extractall(raw_dir)
 
-    flacs = sorted(str(p) for p in (raw_dir / "audio").rglob("*.flac"))
+    flacs = sorted((raw_dir / "audio").rglob("*.flac"))
     if not flacs:
         log.warning("No FLAC files found in %s/audio after extraction.", raw_dir)
         return
 
     log.info("Resampling %d AudioSet clips to 16 kHz wav -> %s", len(flacs), out_dir)
-    ds = datasets.Dataset.from_dict({"audio": flacs})
-    ds = ds.cast_column("audio", datasets.Audio(sampling_rate=16000))
-    for row in tqdm(ds, desc="audioset_16k"):
-        name = Path(row["audio"]["path"]).name.replace(".flac", ".wav")
-        target = out_dir / name
+    for flac_path in tqdm(flacs, desc="audioset_16k"):
+        target = out_dir / (flac_path.stem + ".wav")
         if target.exists():
             continue
-        _write_wav(target, 16000, row["audio"]["array"])
+        arr = _resample_to_16k(str(flac_path))
+        _write_wav16(target, arr)
 
 
 def download_fma(out_dir: Path, n_hours: float) -> None:
@@ -110,11 +126,12 @@ def download_fma(out_dir: Path, n_hours: float) -> None:
     log.info("FMA -> %s (%d clips, ~%.1f hours)", out_dir, n_clips, n_hours)
 
     ds = datasets.load_dataset("rudraml/fma", name="small", split="train", streaming=True)
-    ds = iter(ds.cast_column("audio", datasets.Audio(sampling_rate=16000)))
+    ds = ds.cast_column("audio", datasets.Audio(decode=False))
+    it = iter(ds)
 
     for i in tqdm(range(n_clips), desc="fma"):
         try:
-            row = next(ds)
+            row = next(it)
         except StopIteration:
             log.warning("FMA stream exhausted after %d clips", i)
             break
@@ -122,7 +139,8 @@ def download_fma(out_dir: Path, n_hours: float) -> None:
         target = out_dir / name
         if target.exists():
             continue
-        _write_wav(target, 16000, row["audio"]["array"])
+        arr = _resample_to_16k(io.BytesIO(row["audio"]["bytes"]))
+        _write_wav16(target, arr)
 
 
 def main() -> int:

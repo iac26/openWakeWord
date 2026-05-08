@@ -45,8 +45,7 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     sudo apt-get update -qq
     sudo apt-get install -y --no-install-recommends \
         build-essential git wget curl ca-certificates \
-        libspeexdsp-dev espeak-ng sox libsndfile1 \
-        ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+        libspeexdsp-dev espeak-ng sox libsndfile1 ffmpeg
 fi
 
 # 2. Python venv -------------------------------------------------------------
