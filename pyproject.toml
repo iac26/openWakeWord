@@ -70,6 +70,9 @@ training = [
     "librosa>=0.10,<1",
     "onnx>=1.16,<2",
     "webrtcvad>=2.0.10,<3",
+    # webrtcvad imports `pkg_resources`, removed in setuptools>=81 (shipped
+    # late 2025). Pin so webrtcvad keeps importing.
+    "setuptools<81",
     "piper-phonemize-fix; platform_system == 'Linux'",
     "espeak-phonemizer>=1.3,<2",
 ]
