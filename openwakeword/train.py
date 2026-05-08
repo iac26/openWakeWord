@@ -518,12 +518,36 @@ class Model(nn.Module):
 
         return preds
 
-    def export_model(self, model, model_name, output_dir):
-        """Saves the trained openwakeword model to ONNX format."""
+    def export_model(self, model, model_name, output_dir, temperature=1.0):
+        """Saves the trained openwakeword model to ONNX format.
+
+        temperature > 1 sharpens the output distribution at inference time
+        without retraining: s' = sigmoid(T * logit(s)). Useful when focal
+        loss + mixup leave real-audio scores capped around ~0.55; T≈11 maps
+        0.55 -> 0.9 while keeping the natural threshold at 0.5. T=1.0 (the
+        default) is a no-op.
+        """
 
         if self.n_classes != 1:
             raise ValueError("Exporting models with more than one class is currently not supported! "
                              "Use the `export_to_onnx` function instead.")
+
+        model_to_save = copy.deepcopy(model).to("cpu")
+
+        if temperature != 1.0:
+            class TempScaled(nn.Module):
+                def __init__(self, m, T, eps=1e-6):
+                    super().__init__()
+                    self.m = m
+                    self.T = float(T)
+                    self.eps = eps
+
+                def forward(self, x):
+                    s = self.m(x).clamp(self.eps, 1.0 - self.eps)
+                    logit = torch.log(s) - torch.log(1.0 - s)
+                    return torch.sigmoid(self.T * logit)
+            model_to_save = TempScaled(model_to_save, temperature)
+            logging.info(f"Applying inference temperature scaling T={temperature} to exported ONNX")
 
         # Save ONNX model. opset 17 is required for nn.MultiheadAttention used
         # by the conv_attention head; safe for the dnn / rnn heads as well.
@@ -531,9 +555,8 @@ class Model(nn.Module):
         # size; the runtime in openwakeword.model only reads shape[1] (the
         # fixed 16-frame time axis), so this is backwards compatible.
         logging.info(f"####\nSaving ONNX mode as '{os.path.join(output_dir, model_name + '.onnx')}'")
-        model_to_save = copy.deepcopy(model)
         torch.onnx.export(
-            model_to_save.to("cpu"),
+            model_to_save,
             torch.rand(self.input_shape)[None, ],
             os.path.join(output_dir, model_name + ".onnx"),
             opset_version=17,
@@ -1066,5 +1089,12 @@ if __name__ == '__main__':
             target_fp_per_hour=config["target_false_positives_per_hour"],
         )
 
-        # Export the trained model to onnx
-        oww.export_model(model=best_model, model_name=config["model_name"], output_dir=config["output_dir"])
+        # Export the trained model to onnx. Optional inference_temperature
+        # (default 1.0 = identity) sharpens the sigmoid output post-hoc:
+        # s' = sigmoid(T * logit(s)). T~11 maps a 0.55 peak to ~0.9.
+        oww.export_model(
+            model=best_model,
+            model_name=config["model_name"],
+            output_dir=config["output_dir"],
+            temperature=float(config.get("inference_temperature", 1.0)),
+        )
