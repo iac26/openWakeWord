@@ -54,50 +54,86 @@ def download_mit_rirs(out_dir: Path) -> None:
         _write_wav16(target, row["audio"]["array"])
 
 
+def _resolve_audioset_shards(repo_id: str, requested: list[str]) -> list[str]:
+    """Map requested shard names to actual paths in the repo, listing files via the HF API."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.utils import GatedRepoError, HfHubHTTPError
+
+    api = HfApi()
+    try:
+        all_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    except (GatedRepoError, HfHubHTTPError) as e:
+        log.error(
+            "Could not list files in %s: %s\n"
+            "This dataset is gated. Accept the license at "
+            "https://huggingface.co/datasets/%s then run "
+            "`huggingface-cli login` (or export HF_TOKEN) and retry.",
+            repo_id, e, repo_id,
+        )
+        raise
+
+    tars = [f for f in all_files if f.endswith(".tar")]
+    if not tars:
+        log.error(
+            "No .tar shards found in %s (repo may have been migrated to parquet). "
+            "Available top-level files: %s",
+            repo_id, sorted({f.split('/')[0] for f in all_files})[:20],
+        )
+        raise SystemExit(1)
+
+    resolved: list[str] = []
+    for shard in requested:
+        # Match by exact path, basename, or substring (e.g. "bal_train09" or "bal_train09.tar")
+        cand = [f for f in tars if f == shard or Path(f).name == shard or shard in f]
+        if not cand:
+            log.error(
+                "Requested AudioSet shard %r not found in %s.\n"
+                "Available .tar shards (first 20): %s",
+                shard, repo_id, tars[:20],
+            )
+            raise SystemExit(1)
+        if len(cand) > 1:
+            log.warning("Multiple matches for %r, using %s", shard, cand[0])
+        resolved.append(cand[0])
+    return resolved
+
+
 def download_audioset(workdir: Path, shards: list[str]) -> None:
     """Download AudioSet shards, extract, resample to 16 kHz wav.
 
     `agkphysics/AudioSet` is a gated HuggingFace dataset; you must
     `huggingface-cli login` (or set HF_TOKEN) before running this. We use
-    `hf_hub_download` so the token is sent automatically.
+    `hf_hub_download` so the token is sent automatically, and we resolve the
+    requested shard names against the actual repo file list (the layout has
+    moved between `data/*.tar` and `data/{balanced,unbalanced}/*.tar` in the
+    past).
     """
     import datasets
     from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import GatedRepoError, HfHubHTTPError
 
     raw_dir = workdir / "audioset"
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir = workdir / "audioset_16k"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for shard in shards:
-        tar_path = raw_dir / shard
+    repo_id = "agkphysics/AudioSet"
+    resolved = _resolve_audioset_shards(repo_id, shards)
+    log.info("Resolved shards: %s", resolved)
+
+    for shard_path in resolved:
+        local_name = Path(shard_path).name
+        tar_path = raw_dir / local_name
         if not tar_path.exists() or tar_path.stat().st_size < 1024:
-            log.info("Downloading %s from agkphysics/AudioSet", shard)
-            try:
-                cached = hf_hub_download(
-                    repo_id="agkphysics/AudioSet",
-                    repo_type="dataset",
-                    filename=f"data/{shard}",
-                )
-            except (GatedRepoError, HfHubHTTPError) as e:
-                log.error(
-                    "Could not fetch %s from agkphysics/AudioSet: %s\n"
-                    "This dataset is gated. Accept the license at "
-                    "https://huggingface.co/datasets/agkphysics/AudioSet then run "
-                    "`huggingface-cli login` (or export HF_TOKEN) and retry.",
-                    shard, e,
-                )
-                raise
-            # Symlink/copy into our raw_dir so the extraction location is stable
+            log.info("Downloading %s from %s", shard_path, repo_id)
+            cached = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=shard_path)
             try:
                 os.symlink(cached, tar_path)
             except FileExistsError:
                 pass
         else:
-            log.info("[skip] %s already present", shard)
+            log.info("[skip] %s already present", local_name)
 
-        log.info("Extracting %s", shard)
+        log.info("Extracting %s", local_name)
         with tarfile.open(tar_path) as tf:
             tf.extractall(raw_dir)
 
