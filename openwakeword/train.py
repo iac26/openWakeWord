@@ -823,66 +823,81 @@ class Model(nn.Module):
                     accumulated_predictions = torch.Tensor([]).to(self.device)
                     accumulated_labels = torch.Tensor([]).to(self.device)
 
-            # Run validation and log validation metrics
-            if step_ndx in val_steps and step_ndx > 1 and false_positive_val_data is not None:
-                # Get false positives per hour with false positive data
-                val_fp = 0
-                for val_step_ndx, data in enumerate(false_positive_val_data):
-                    with torch.no_grad():
-                        x_val, y_val = data[0].to(self.device), data[1].to(self.device)
-                        val_predictions = self.model(x_val)
-                        val_fp += self.fp(val_predictions, y_val[..., None])
-                val_fp_per_hr = (val_fp/val_set_hrs).detach().cpu().numpy()
-                self.history["val_fp_per_hr"].append(val_fp_per_hr)
+            # Validation block. Switch the model to eval mode for the entire
+            # block — without this, BatchNorm uses the val-batch statistics
+            # (which differ wildly from the train distribution because the
+            # val set is 50:50 pos:neg while training batches are heavily
+            # negative-weighted). That gave saved val_recall values up to
+            # ~60x lower than the same model's recall when re-evaluated in
+            # eval mode after _select_best_model. Restore train mode in a
+            # finally so a mid-val exception can't leave us in eval mode
+            # for subsequent training steps (which would freeze BN updates).
+            is_val_step = step_ndx in val_steps and step_ndx > 1
+            if is_val_step:
+                self.model.eval()
 
-            # Get recall on test clips
-            if step_ndx in val_steps and step_ndx > 1 and positive_test_clips is not None:
-                tp = 0
-                fn = 0
-                for val_step_ndx, data in enumerate(positive_test_clips):
-                    with torch.no_grad():
-                        x_val = data[0].to(self.device)
-                        batch = []
-                        for i in range(0, x_val.shape[1]-16, 1):
-                            batch.append(x_val[:, i:i+16, :])
-                        batch = torch.vstack(batch)
-                        preds = self.model(batch)
-                        if any(preds >= 0.5):
-                            tp += 1
-                        else:
-                            fn += 1
-                self.history["positive_test_clips_recall"].append(tp/(tp + fn))
+            try:
+                # Run validation and log validation metrics
+                if is_val_step and false_positive_val_data is not None:
+                    # Get false positives per hour with false positive data
+                    val_fp = 0
+                    for val_step_ndx, data in enumerate(false_positive_val_data):
+                        with torch.no_grad():
+                            x_val, y_val = data[0].to(self.device), data[1].to(self.device)
+                            val_predictions = self.model(x_val)
+                            val_fp += self.fp(val_predictions, y_val[..., None])
+                    val_fp_per_hr = (val_fp/val_set_hrs).detach().cpu().numpy()
+                    self.history["val_fp_per_hr"].append(val_fp_per_hr)
 
-            if step_ndx in val_steps and step_ndx > 1 and X_val is not None:
-                # Concatenate predictions/labels across batches before
-                # computing metrics. The original code overwrote val_recall /
-                # val_acc / val_fp each iteration; that was harmless when
-                # X_val ran in a single huge batch, but breaks now that we
-                # cap the val batch size to keep MultiheadAttention's CUDA
-                # SDPA kernel from crashing.
-                all_preds = []
-                all_labels = []
-                for val_step_ndx, data in enumerate(X_val):
-                    with torch.no_grad():
-                        x_val, y_val = data[0].to(self.device), data[1].to(self.device)
-                        all_preds.append(self.model(x_val))
-                        all_labels.append(y_val)
-                all_preds = torch.cat(all_preds)
-                all_labels = torch.cat(all_labels)
-                # Reset stateful metrics so val_recall/val_acc reflect THIS
-                # val_step's predictions only, not the cumulative average
-                # across every previous train-batch + val call. Without this,
-                # best_model_scores recorded misleadingly small recalls,
-                # causing _select_best_model to pick poorly-performing
-                # checkpoints.
-                self.recall.reset()
-                self.accuracy.reset()
-                val_recall = self.recall(all_preds, all_labels[..., None]).detach().cpu().numpy()
-                val_acc = self.accuracy(all_preds, all_labels[..., None].to(torch.int64))
-                val_fp = self.fp(all_preds, all_labels[..., None])
-                self.history["val_accuracy"].append(val_acc.detach().cpu().numpy())
-                self.history["val_recall"].append(val_recall)
-                self.history["val_n_fp"].append(val_fp.detach().cpu().numpy())
+                # Get recall on test clips
+                if is_val_step and positive_test_clips is not None:
+                    tp = 0
+                    fn = 0
+                    for val_step_ndx, data in enumerate(positive_test_clips):
+                        with torch.no_grad():
+                            x_val = data[0].to(self.device)
+                            batch = []
+                            for i in range(0, x_val.shape[1]-16, 1):
+                                batch.append(x_val[:, i:i+16, :])
+                            batch = torch.vstack(batch)
+                            preds = self.model(batch)
+                            if any(preds >= 0.5):
+                                tp += 1
+                            else:
+                                fn += 1
+                    self.history["positive_test_clips_recall"].append(tp/(tp + fn))
+
+                if is_val_step and X_val is not None:
+                    # Concatenate predictions/labels across batches before
+                    # computing metrics. The original code overwrote
+                    # val_recall / val_acc / val_fp each iteration; that was
+                    # harmless when X_val ran in a single huge batch, but
+                    # breaks now that we cap the val batch size to keep
+                    # MultiheadAttention's CUDA SDPA kernel from crashing.
+                    all_preds = []
+                    all_labels = []
+                    for val_step_ndx, data in enumerate(X_val):
+                        with torch.no_grad():
+                            x_val, y_val = data[0].to(self.device), data[1].to(self.device)
+                            all_preds.append(self.model(x_val))
+                            all_labels.append(y_val)
+                    all_preds = torch.cat(all_preds)
+                    all_labels = torch.cat(all_labels)
+                    # Reset stateful metrics so val_recall/val_acc reflect
+                    # THIS val_step's predictions only, not the cumulative
+                    # running average across every previous train-batch + val
+                    # call.
+                    self.recall.reset()
+                    self.accuracy.reset()
+                    val_recall = self.recall(all_preds, all_labels[..., None]).detach().cpu().numpy()
+                    val_acc = self.accuracy(all_preds, all_labels[..., None].to(torch.int64))
+                    val_fp = self.fp(all_preds, all_labels[..., None])
+                    self.history["val_accuracy"].append(val_acc.detach().cpu().numpy())
+                    self.history["val_recall"].append(val_recall)
+                    self.history["val_n_fp"].append(val_fp.detach().cpu().numpy())
+            finally:
+                if is_val_step:
+                    self.model.train()
 
             # Save models with a validation score above/below the 90th percentile
             # of the validation scores up to that point. Phase-1 (long, high-LR)
