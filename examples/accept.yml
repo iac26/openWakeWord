@@ -89,7 +89,7 @@ label_smoothing: 0.05
 weight_decay: 0.01
 
 # Post-hoc temperature on the exported ONNX. See hey_ari.yml.
-inference_temperature: 11.0
+inference_temperature: 1.0
 
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
