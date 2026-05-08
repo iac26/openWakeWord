@@ -2506,7 +2506,7 @@ training = [
 [package.metadata]
 requires-dist = [
     { name = "audiomentations", marker = "extra == 'training'", specifier = ">=0.33.0,<1" },
-    { name = "datasets", marker = "extra == 'training'", specifier = ">=2.14.4,<5" },
+    { name = "datasets", marker = "extra == 'training'", specifier = ">=2.14.6,<3" },
     { name = "flake8", marker = "extra == 'test'", specifier = ">=5.0,<8" },
     { name = "librosa", marker = "extra == 'training'", specifier = ">=0.10,<1" },
     { name = "mock", marker = "extra == 'test'", specifier = ">=5.1,<6" },

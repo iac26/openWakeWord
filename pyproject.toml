@@ -53,7 +53,11 @@ training = [
     "tqdm>=4.64.0,<5",
     "pyyaml>=6.0.1,<7",
     "pronouncing>=0.2.0,<1",
-    "datasets>=2.14.4,<5",
+    # `datasets>=3` made torchcodec a hard requirement for the Audio feature
+    # type, which is brittle on hosts whose ffmpeg ABI doesn't match the wheel
+    # (Ubuntu 22.04 ships libavutil.so.56 but torchcodec wants 57+). Pin to
+    # 2.x to keep the notebook-style streaming + Audio(sampling_rate=...) flow.
+    "datasets>=2.14.6,<3",
     "soundfile>=0.12,<1",
     "librosa>=0.10,<1",
     "onnx>=1.16,<2",
