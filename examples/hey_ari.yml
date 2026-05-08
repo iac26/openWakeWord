@@ -17,9 +17,10 @@ n_samples: 50000
 n_samples_val: 2000
 
 # tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).
-# augmentation_batch_size does NOT — bumping it makes the augment+feature
-# step slower because per-clip CPU prep runs serially and bigger batches
-# leave the GPU idle longer between yields. Stick with 16 (upstream default).
+# augmentation_batch_size MUST stay at 16: torch_audiomentations augment2
+# uses mode="per_batch" (one set of params per batch), so larger batches
+# directly reduce augmentation diversity. Per-clip CPU prep is now
+# pipelined via DataLoader workers, so 16 is no longer a speed bottleneck.
 tts_batch_size: 256
 augmentation_batch_size: 16
 
