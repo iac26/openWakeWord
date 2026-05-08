@@ -1,0 +1,53 @@
+# Training config for the "hey ari" wake word.
+# Paths assume install_training.sh + prepare_datasets.py have populated
+# ./training_workspace/ at the repo root. Adjust if your layout differs.
+
+model_name: "hey_ari"
+
+target_phrase:
+  - "hey ari"
+
+# Add phrases here later if you observe specific false-positive triggers in
+# practice (e.g. "hey aria", "hairy", etc.).
+custom_negative_phrases: []
+
+# Synthetic positives. 50k is a reasonable middle ground; bump to 100k+ for
+# best accuracy if your GPU has the time.
+n_samples: 50000
+n_samples_val: 2000
+
+tts_batch_size: 50
+augmentation_batch_size: 16
+
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+
+background_paths:
+  - "./training_workspace/audioset_16k"
+  - "./training_workspace/fma"
+
+background_paths_duplication_rate:
+  - 1
+  - 1
+
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+
+augmentation_rounds: 1
+
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+
+model_type: "dnn"
+layer_size: 32
+
+steps: 50000
+max_negative_weight: 1500
+target_false_positives_per_hour: 0.2

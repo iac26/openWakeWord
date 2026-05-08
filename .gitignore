@@ -136,9 +136,13 @@ notebooks/
 !notebooks/training_models.ipynb
 !training_tutorial_data
 
-# Most example files
-examples/
+# Most example files (ignore contents but allow specific files)
+examples/*
+!examples/audio
+examples/audio/*
 !examples/audio/activation.wav
+!examples/custom_model.yml
+!examples/hey_ari.yml
 
 # archive files
 archive/
