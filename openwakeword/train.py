@@ -383,11 +383,16 @@ class Model(nn.Module):
 
         best_model = self.best_models[best_ndx]
         best_score = self.best_model_scores[best_ndx]
+        # Force eval mode: best_models entries were deep-copied during training
+        # (so they're still in train mode with active BN batch-stats updates).
+        # Inference must use eval mode or BN/dropout misbehave.
+        best_model.eval()
         logging.info(
-            f"Best model from training step {best_score['training_step_ndx']} "
-            f"of {len(self.best_models)} candidates: "
-            f"recall={all_recalls[best_ndx]:.4f}, "
-            f"FP/hr={false_positive_rates[best_ndx]:.4f}"
+            "Best model from training step %s of %d candidates: recall=%.4f FP/hr=%.4f",
+            best_score['training_step_ndx'],
+            len(self.best_models),
+            float(np.asarray(all_recalls[best_ndx]).item()),
+            float(np.asarray(false_positive_rates[best_ndx]).item()),
         )
         return best_model
 
@@ -407,7 +412,7 @@ class Model(nn.Module):
         with torch.no_grad():
             # Positive vs negative predictions from X_val (labels split).
             pos_preds_parts, neg_preds_parts = [], []
-            for batch in X_val:
+            for batch in tqdm(X_val, desc="Threshold sweep: collecting X_val preds"):
                 x, y = batch[0].to(self.device), batch[1].to(self.device)
                 p = model(x).squeeze(-1).detach().cpu().numpy()
                 y_np = y.detach().cpu().numpy().astype(bool)
@@ -418,7 +423,7 @@ class Model(nn.Module):
             # Long negative-only set drives the FPPH calc since it has the
             # known duration (val_set_hrs).
             fp_preds_parts = []
-            for batch in false_positive_val_data:
+            for batch in tqdm(false_positive_val_data, desc="Threshold sweep: collecting FP-set preds"):
                 x = batch[0].to(self.device)
                 fp_preds_parts.append(model(x).squeeze(-1).detach().cpu().numpy())
             fp_preds = np.concatenate(fp_preds_parts) if fp_preds_parts else np.array([])
@@ -542,30 +547,39 @@ class Model(nn.Module):
         # Report validation metrics for combined model. Accumulate preds+labels
         # across all val batches; computing the metric from only the last batch
         # (the previous behaviour) gave nonsense recall/accuracy on small final
-        # batches.
+        # batches. Use FRESH torchmetrics objects so accumulated training-time
+        # state doesn't poison the final report. Combined_model is in eval
+        # mode by now (forced in _select_best_model).
+        combined_model.eval()
+        recall_fn = torchmetrics.Recall(task='binary').to(self.device)
+        accuracy_fn = torchmetrics.Accuracy(task='binary').to(self.device)
         with torch.no_grad():
             all_preds, all_labels = [], []
-            for batch in X_val:
+            for batch in tqdm(X_val, desc="Val (X_val) on selected model"):
                 x, y = batch[0].to(self.device), batch[1].to(self.device)
                 all_preds.append(combined_model(x))
                 all_labels.append(y)
             val_ps = torch.cat(all_preds)
             y = torch.cat(all_labels)
 
-            combined_model_recall = self.recall(val_ps, y[..., None]).detach().cpu().numpy()
-            combined_model_accuracy = self.accuracy(val_ps, y[..., None].to(torch.int64)).detach().cpu().numpy()
+            combined_model_recall = recall_fn(val_ps, y[..., None]).detach().cpu().numpy()
+            combined_model_accuracy = accuracy_fn(val_ps, y[..., None].to(torch.int64)).detach().cpu().numpy()
 
             combined_model_fp = 0
-            for batch in false_positive_val_data:
+            for batch in tqdm(false_positive_val_data, desc="Val (FP set) on selected model"):
                 x_val, y_val = batch[0].to(self.device), batch[1].to(self.device)
                 val_ps = combined_model(x_val)
-                combined_model_fp += self.fp(val_ps, y_val[..., None])
+                combined_model_fp = combined_model_fp + self.fp(val_ps, y_val[..., None])
 
             combined_model_fp_per_hr = (combined_model_fp/val_set_hrs).detach().cpu().numpy()
 
-        logging.info(f"\n################\nFinal Model Accuracy: {combined_model_accuracy}"
-                     f"\nFinal Model Recall: {combined_model_recall}\nFinal Model False Positives per Hour: {combined_model_fp_per_hr}"
-                     "\n################\n")
+        logging.info(
+            "Final Model Accuracy: %.4f | Recall: %.4f | FP/hr: %.4f",
+            float(np.asarray(combined_model_accuracy).item()),
+            float(np.asarray(combined_model_recall).item()),
+            float(np.asarray(combined_model_fp_per_hr).item()),
+        )
+        sys.stderr.flush()
 
         # Post-hoc threshold optimization. Sweeps thresholds on the val set
         # and picks the one that maximizes recall while keeping FPPH below
@@ -580,12 +594,10 @@ class Model(nn.Module):
             target_fpph=target_fp_per_hour,
         )
         logging.info(
-            f"\n################\nOptimal deployment threshold: {opt_t:.2f}"
-            f"\n  recall at this threshold: {opt_recall:.4f}"
-            f"\n  FP/hr at this threshold:  {opt_fpph:.4f}"
-            f"\n  (target was {target_fp_per_hour})"
-            "\n################\n"
+            "Optimal deployment threshold: %.2f | recall=%.4f | FP/hr=%.4f (target was %.2f)",
+            float(opt_t), float(opt_recall), float(opt_fpph), float(target_fp_per_hour),
         )
+        sys.stderr.flush()
 
         return combined_model
 
@@ -874,6 +886,22 @@ class Model(nn.Module):
 
 
 if __name__ == '__main__':
+    # Configure root logger explicitly: previously we relied on the default
+    # WARNING-level logger, which let early INFO logs slip through somehow but
+    # silently dropped late-stage INFO records (the "Best model from..." /
+    # final-stats / threshold-sweep block disappeared even though the script
+    # ran to completion and produced the ONNX). Force a known config + line
+    # buffering on stderr.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s:%(name)s: %(message)s",
+        force=True,
+    )
+    try:
+        sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     # Get training config file
     parser = argparse.ArgumentParser()
     parser.add_argument(
