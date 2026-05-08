@@ -33,7 +33,27 @@ from speechbrain.dataio.dataio import read_audio
 from speechbrain.processing.signal_processing import reverberate
 import torchaudio
 import mutagen
-import acoustics
+
+
+_NOISE_COLOR_EXPONENTS = {"white": 0.0, "pink": 1.0, "brown": 2.0, "blue": -1.0, "violet": -2.0}
+
+
+def _colored_noise(n: int, color: str = "white") -> np.ndarray:
+    """Generate `n` samples of colored noise via FFT shaping.
+
+    PSD ~ 1/f**alpha where alpha = _NOISE_COLOR_EXPONENTS[color]. Replaces the
+    `acoustics.generator.noise` API; that package has no Python 3.12 wheels.
+    """
+    alpha = _NOISE_COLOR_EXPONENTS[color]
+    n_freqs = n // 2 + 1
+    freqs = np.fft.rfftfreq(n)
+    scale = np.ones(n_freqs)
+    nz = freqs > 0
+    scale[nz] = freqs[nz] ** (-alpha / 2.0)
+    spectrum = (np.random.randn(n_freqs) + 1j * np.random.randn(n_freqs)) * scale
+    out = np.fft.irfft(spectrum, n=n).astype(np.float32)
+    peak = float(np.max(np.abs(out)))
+    return out / peak if peak > 0 else out
 
 
 # Load audio clips and structure into clips of the same length
@@ -431,8 +451,8 @@ def mix_clips_batch(
 
             if np.random.random() < generated_noise_augmentation:
                 noise_color = ["white", "pink", "blue", "brown", "violet"]
-                noise_clip = acoustics.generator.noise(combined_size, color=np.random.choice(noise_color))
-                noise_clip = torch.from_numpy(noise_clip/noise_clip.max())
+                noise_clip = _colored_noise(combined_size, color=str(np.random.choice(noise_color)))
+                noise_clip = torch.from_numpy(noise_clip / max(noise_clip.max(), 1e-12))
                 mixed_clip = mix_clip(mixed_clip, noise_clip, np.random.choice(snrs_db), 0)
 
             mixed_clips.append(mixed_clip)

@@ -572,23 +572,37 @@ class Model(nn.Module):
 
 # Separate function to convert onnx models to tflite format
 def convert_onnx_to_tflite(onnx_model_path, output_path):
-    """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format."""
-    # imports
-    import onnx
-    from onnx_tf.backend import prepare
-    import tensorflow as tf
+    """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format.
 
-    # Convert to tflite from onnx model
-    onnx_model = onnx.load(onnx_model_path)
-    tf_rep = prepare(onnx_model, device="CPU")
+    Uses `onnx2tf` (works on Python 3.12 with modern TensorFlow) rather than the
+    old `onnx_tf` + `tensorflow==2.8.1` stack, which has no py3.12 wheels.
+    """
+    try:
+        import onnx2tf
+    except ImportError as e:
+        raise ImportError(
+            "onnx2tf is required for ONNX->TFLite conversion. "
+            "Install with: pip install 'openwakeword[tflite-export]'"
+        ) from e
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tf_rep.export_graph(os.path.join(tmp_dir, "tf_model"))
-        converter = tf.lite.TFLiteConverter.from_saved_model(os.path.join(tmp_dir, "tf_model"))
-        tflite_model = converter.convert()
+        onnx2tf.convert(
+            input_onnx_file_path=onnx_model_path,
+            output_folder_path=tmp_dir,
+            copy_onnx_input_output_names_to_tflite=True,
+            non_verbose=True,
+        )
+        # onnx2tf writes <model_basename>_float32.tflite by default
+        produced = os.path.join(tmp_dir, os.path.splitext(os.path.basename(onnx_model_path))[0] + "_float32.tflite")
+        if not os.path.exists(produced):
+            candidates = [f for f in os.listdir(tmp_dir) if f.endswith("_float32.tflite")]
+            if not candidates:
+                raise RuntimeError(f"onnx2tf did not produce a tflite file in {tmp_dir}")
+            produced = os.path.join(tmp_dir, candidates[0])
 
         logging.info(f"####\nSaving tflite mode to '{output_path}'")
-        with open(output_path, 'wb') as f:
-            f.write(tflite_model)
+        with open(produced, "rb") as src, open(output_path, "wb") as dst:
+            dst.write(src.read())
 
     return None
 

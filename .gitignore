@@ -142,3 +142,10 @@ examples/
 
 # archive files
 archive/
+
+# Downloaded model artifacts (fetched at runtime / by install_training.sh)
+openwakeword/resources/
+
+# Training workspace created by install_training.sh / prepare_datasets.py
+training_workspace/
+
