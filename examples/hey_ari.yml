@@ -91,24 +91,14 @@ n_heads: 4
 n_conv: 2     # number of Conv1D(kernel=3) blocks
 n_attn: 1     # number of MultiheadAttention blocks (residual + LayerNorm)
 
-# Focal loss focuses gradient on hard examples. gamma=2 (livekit default)
-# down-weights correctly-classified positives by (1-p)^2 — at p=0.7 the
-# gradient is only 9% of plain BCE, so the optimizer stops pushing the
-# score higher even though it could. That compresses the output
-# distribution and forces a low deployment threshold. gamma=1 keeps the
-# hard-example focus but the down-weighting is much gentler so easy
-# positives keep climbing toward 1.0.
+# Focal loss + embedding mixup as published by livekit-wakeword. We
+# briefly tried gamma=1 + mixup off to push trained scores past ~0.6;
+# that hurt the model on real audio enough to be worse overall. Back to
+# the upstream defaults. If we want sharper post-hoc scores, do it with
+# temperature scaling at inference rather than by weakening the loss.
 loss_type: "focal"
-focal_gamma: 1.0
-
-# Embedding mixup interpolates (x, y) pairs at training time, which
-# produces SOFT labels — the model never sees a target of 1.0 for a
-# 50%-mixed input and so never learns to confidently predict 1.0.
-# Disabled because we want sharp scores on real audio at deployment;
-# the regularization benefit is marginal compared to the calibration
-# cost. Re-enable with a very small alpha (e.g. 0.05) if you start
-# seeing overfitting symptoms.
-embedding_mixup: false
+focal_gamma: 2.0
+embedding_mixup: true
 mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.

@@ -78,12 +78,10 @@ n_heads: 4
 n_conv: 2
 n_attn: 1
 
-# Focal loss + embedding mixup: see hey_ari.yml. gamma=1 (was 2) and
-# mixup off so trained scores can reach >0.9 on real audio instead of
-# saturating around 0.6.
+# Focal loss + embedding mixup: see hey_ari.yml.
 loss_type: "focal"
-focal_gamma: 1.0
-embedding_mixup: false
+focal_gamma: 2.0
+embedding_mixup: true
 mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.
