@@ -26,8 +26,25 @@ import numpy as np
 import scipy.io.wavfile
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_BAR_FMT = "{l_bar}{bar:30}{r_bar}"
+
+
+def _section(title: str) -> None:
+    line = "=" * 70
+    print(f"\n{line}\n  {title}\n{line}")
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("prepare_datasets")
+
+# Quiet down chatty third-party loggers so the script's own progress is readable.
+for _name in (
+    "httpx", "httpcore", "urllib3", "requests",
+    "huggingface_hub", "datasets", "filelock", "fsspec",
+):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+os.environ.setdefault("DATASETS_VERBOSITY", "warning")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "warning")
 
 TARGET_SR = 16000
 
@@ -40,13 +57,13 @@ def download_mit_rirs(out_dir: Path) -> None:
     import datasets
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    log.info("MIT RIRs -> %s (streaming from HuggingFace)", out_dir)
+    _section(f"MIT RIRs -> {out_dir}")
     ds = datasets.load_dataset(
         "davidscripka/MIT_environmental_impulse_responses",
         split="train",
         streaming=True,
     )
-    for row in tqdm(ds, desc="mit_rirs"):
+    for row in tqdm(ds, desc="mit_rirs", bar_format=_BAR_FMT, unit="file"):
         name = Path(row["audio"]["path"]).name
         target = out_dir / name
         if target.exists():
@@ -117,23 +134,23 @@ def download_audioset(workdir: Path, shards: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repo_id = "agkphysics/AudioSet"
+    _section(f"AudioSet ({len(shards)} shard(s)) -> {out_dir}")
     resolved = _resolve_audioset_shards(repo_id, shards)
-    log.info("Resolved shards: %s", resolved)
 
     for shard_path in resolved:
         local_name = Path(shard_path).name
         tar_path = raw_dir / local_name
         if not tar_path.exists() or tar_path.stat().st_size < 1024:
-            log.info("Downloading %s from %s", shard_path, repo_id)
+            print(f"  download  {shard_path}")
             cached = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=shard_path)
             try:
                 os.symlink(cached, tar_path)
             except FileExistsError:
                 pass
         else:
-            log.info("[skip] %s already present", local_name)
+            print(f"  cached    {local_name}")
 
-        log.info("Extracting %s", local_name)
+        print(f"  extract   {local_name}")
         with tarfile.open(tar_path) as tf:
             tf.extractall(raw_dir)
 
@@ -142,10 +159,10 @@ def download_audioset(workdir: Path, shards: list[str]) -> None:
         log.warning("No FLAC files found in %s/audio after extraction.", raw_dir)
         return
 
-    log.info("Resampling %d AudioSet clips to 16 kHz wav -> %s", len(flacs), out_dir)
+    print(f"  resample  {len(flacs)} clips -> {out_dir}")
     ds = datasets.Dataset.from_dict({"audio": flacs})
     ds = ds.cast_column("audio", datasets.Audio(sampling_rate=TARGET_SR))
-    for row in tqdm(ds, desc="audioset_16k"):
+    for row in tqdm(ds, desc="audioset_16k", bar_format=_BAR_FMT, unit="clip"):
         name = Path(row["audio"]["path"]).name.replace(".flac", ".wav")
         target = out_dir / name
         if target.exists():
@@ -162,12 +179,12 @@ def download_fma(out_dir: Path, n_hours: float) -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     n_clips = int(n_hours * 3600 / 30)
-    log.info("FMA -> %s (target %d clips, ~%.1f hours)", out_dir, n_clips, n_hours)
+    _section(f"FMA -> {out_dir} ({n_clips} clips, ~{n_hours:.1f} h)")
 
     ds = datasets.load_dataset("rudraml/fma", name="small", split="train", streaming=True)
     ds = iter(ds.cast_column("audio", datasets.Audio(sampling_rate=TARGET_SR)))
 
-    for i in tqdm(range(n_clips), desc="fma"):
+    for i in tqdm(range(n_clips), desc="fma", bar_format=_BAR_FMT, unit="clip"):
         try:
             row = next(ds)
         except StopIteration:
@@ -196,7 +213,7 @@ def main() -> int:
     args = parser.parse_args()
 
     args.workdir.mkdir(parents=True, exist_ok=True)
-    log.info("workdir = %s", args.workdir.resolve())
+    print(f"workdir = {args.workdir.resolve()}")
 
     try:
         if not args.skip_rirs:
@@ -209,11 +226,10 @@ def main() -> int:
         log.error("Missing dependency: %s. Run `pip install -e .[training]` first.", e)
         return 2
 
-    log.info("Done. Set in your training YAML:")
-    log.info("  background_paths: ['%s', '%s']",
-             (args.workdir / "audioset_16k").resolve(),
-             (args.workdir / "fma").resolve())
-    log.info("  rir_paths: ['%s']", (args.workdir / "mit_rirs").resolve())
+    _section("Done. Set in your training YAML:")
+    print(f"  background_paths: ['{(args.workdir / 'audioset_16k').resolve()}',")
+    print(f"                     '{(args.workdir / 'fma').resolve()}']")
+    print(f"  rir_paths:        ['{(args.workdir / 'mit_rirs').resolve()}']")
     return 0
 
 
