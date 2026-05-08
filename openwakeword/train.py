@@ -338,6 +338,9 @@ class Model(nn.Module):
 
         candidate_model_ndx = [ndx for ndx, fp in enumerate(false_positive_rates) if fp <= max_fp_per_hour]
         candidate_model_recall = [self.best_model_scores[ndx]["val_recall"] for ndx in candidate_model_ndx]
+        if not candidate_model_recall:
+            logging.warning(f"No checkpoints had FP/hr <= {max_fp_per_hour}!")
+            return None
         if max(candidate_model_recall) <= min_recall:
             logging.warning(f"No models with recall >= {min_recall} found!")
             return None
@@ -415,23 +418,23 @@ class Model(nn.Module):
                     val_steps=val_steps, warmup_steps=steps//5,
                     hold_steps=steps//3, lr=lr, val_set_hrs=val_set_hrs)
 
-        # Merge best models
-        logging.info("Merging checkpoints above the 90th percentile into single model...")
-        accuracy_percentile = np.percentile(self.history["val_accuracy"], 90)
-        recall_percentile = np.percentile(self.history["val_recall"], 90)
-        fp_percentile = np.percentile(self.history["val_fp_per_hr"], 10)
-
-        # Get models above the 90th percentile
-        models = []
-        for model, score in zip(self.best_models, self.best_model_scores):
-            if score["val_accuracy"] >= accuracy_percentile and \
-                    score["val_recall"] >= recall_percentile and \
-                    score["val_fp_per_hr"] <= fp_percentile:
-                models.append(model)
-
-        if len(models) > 0:
-            combined_model = self.average_models(models=models)
-        else:
+        # Pick a single best checkpoint instead of averaging weights across
+        # the three LR sequences. For the conv_attention head (BatchNorm +
+        # MultiheadAttention), averaging running stats and attention weights
+        # from very different training stages (LR 1e-4, 1e-5, 1e-6) tended to
+        # smear the model and produce a worse final artifact than any single
+        # checkpoint. Highest-recall checkpoint with FP <= target wins; fall
+        # back to the running self.model if nothing qualifies.
+        logging.info("Selecting single best checkpoint by FP/recall...")
+        combined_model = self._select_best_model(
+            false_positive_validate_data=false_positive_val_data,
+            val_set_hrs=val_set_hrs,
+            max_fp_per_hour=target_fp_per_hour,
+            min_recall=0.20,
+        )
+        if combined_model is None:
+            logging.warning("No checkpoint met the FP/recall bar; falling back "
+                            "to the final-step model.")
             combined_model = self.model
 
         # Report validation metrics for combined model. Accumulate preds+labels
