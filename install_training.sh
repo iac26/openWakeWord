@@ -105,7 +105,9 @@ if [[ "$DOWNLOAD_PIPER" == "1" ]]; then
     PIPER_DIR="$WORKDIR/piper-sample-generator"
     if [[ ! -d "$PIPER_DIR" ]]; then
         echo "==> Cloning piper-sample-generator"
-        git clone --depth 1 https://github.com/rhasspy/piper-sample-generator "$PIPER_DIR"
+        # dscripka's fork keeps the flat `generate_samples.py` layout that
+        # openwakeword's train.py expects (rhasspy's was restructured).
+        git clone --depth 1 https://github.com/dscripka/piper-sample-generator "$PIPER_DIR"
     fi
     PIPER_VOICE="$PIPER_DIR/models/en_US-libritts_r-medium.pt"
     if [[ ! -s "$PIPER_VOICE" ]]; then
