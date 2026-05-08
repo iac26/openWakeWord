@@ -70,10 +70,21 @@ batch_n_per_class:
   "adversarial_negative": 50
   "positive": 50
 
-model_type: "dnn"
-# layer_size 128 matches upstream alexa/hey_mycroft (~214k params, ~830 KB
-# ONNX). n_blocks defaults to 1; upstream models also use n_blocks=1.
+model_type: "conv_attention"
+# Conv1D blocks + multi-head self-attention + mean pool over time. See
+# hey_ari.yml for full rationale. Single-word commands like "accept" are
+# especially helped by the temporal-aware head, since phonetic neighbours
+# differ in fine-grained timing.
 layer_size: 128
+n_heads: 4
+n_conv: 2
+n_attn: 1
+
+# Focal loss + embedding mixup: see hey_ari.yml.
+loss_type: "focal"
+focal_gamma: 2.0
+embedding_mixup: true
+mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
