@@ -51,114 +51,39 @@ class AudioFeatures():
             embedding_model_path (str): The path to the model for Google's `speech_embedding` model
             sr (int): The sample rate of the audio (default: 16000 khz)
             ncpu (int): The number of CPUs to use when computing melspectrograms and audio features (default: 1)
-            inference_framework (str): The inference framework to use when for model prediction. Options are
-                                       "tflite" or "onnx". The default is "tflite" as this results in better
-                                       efficiency on common platforms (x86, ARM64), but in some deployment
-                                       scenarios ONNX models may be preferable.
+            inference_framework (str): Only "onnx" is supported. Kept for backwards-compatible kwargs.
             device (str): The device to use when running the models, either "cpu" or "gpu" (default is "cpu".)
-                          Note that depending on the inference framework selected and system configuration,
-                          this setting may not have an effect. For example, to use a GPU with the ONNX
-                          framework the appropriate onnxruntime package must be installed.
+                          To use a GPU, install the appropriate onnxruntime-gpu package.
         """
-        # Initialize the models with the appropriate framework
-        if inference_framework == "onnx":
-            try:
-                import onnxruntime as ort
-            except ImportError:
-                raise ValueError("Tried to import onnxruntime, but it was not found. Please install it using `pip install onnxruntime`")
+        if inference_framework != "onnx":
+            raise ValueError(
+                f"Unsupported inference_framework={inference_framework!r}; only 'onnx' is supported."
+            )
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            raise ValueError("Tried to import onnxruntime, but it was not found. Please install it using `pip install onnxruntime`")
 
-            if melspec_model_path == "":
-                melspec_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(), "resources", "models", "melspectrogram.onnx")
-            if embedding_model_path == "":
-                embedding_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(), "resources", "models", "embedding_model.onnx")
+        if melspec_model_path == "":
+            melspec_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(), "resources", "models", "melspectrogram.onnx")
+        if embedding_model_path == "":
+            embedding_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(), "resources", "models", "embedding_model.onnx")
 
-            if ".tflite" in melspec_model_path or ".tflite" in embedding_model_path:
-                raise ValueError("The onnx inference framework is selected, but tflite models were provided!")
+        if ".tflite" in melspec_model_path or ".tflite" in embedding_model_path:
+            raise ValueError("TFLite models are no longer supported; please provide ONNX models.")
 
-            # Initialize ONNX options
-            sessionOptions = ort.SessionOptions()
-            sessionOptions.inter_op_num_threads = ncpu
-            sessionOptions.intra_op_num_threads = ncpu
+        sessionOptions = ort.SessionOptions()
+        sessionOptions.inter_op_num_threads = ncpu
+        sessionOptions.intra_op_num_threads = ncpu
 
-            # Melspectrogram model
-            self.melspec_model = ort.InferenceSession(melspec_model_path, sess_options=sessionOptions,
-                                                      providers=["CUDAExecutionProvider"] if device == "gpu" else ["CPUExecutionProvider"])
-            self.onnx_execution_provider = self.melspec_model.get_providers()[0]
-            self.melspec_model_predict = lambda x: self.melspec_model.run(None, {'input': x})
+        providers = ["CUDAExecutionProvider"] if device == "gpu" else ["CPUExecutionProvider"]
 
-            # Audio embedding model
-            self.embedding_model = ort.InferenceSession(embedding_model_path, sess_options=sessionOptions,
-                                                        providers=["CUDAExecutionProvider"] if device == "gpu"
-                                                        else ["CPUExecutionProvider"])
-            self.embedding_model_predict = lambda x: self.embedding_model.run(None, {'input_1': x})[0].squeeze()
+        self.melspec_model = ort.InferenceSession(melspec_model_path, sess_options=sessionOptions, providers=providers)
+        self.onnx_execution_provider = self.melspec_model.get_providers()[0]
+        self.melspec_model_predict = lambda x: self.melspec_model.run(None, {'input': x})
 
-        elif inference_framework == "tflite":
-            try:
-                import ai_edge_litert.interpreter as tflite
-            except ImportError:
-                raise ValueError("Tried to import the LiteRT runtime, but it was not found."
-                                 "Please install it using `pip install ai-edge-litert`")
-
-            if melspec_model_path == "":
-                melspec_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(),
-                                                  "resources", "models", "melspectrogram.tflite")
-            if embedding_model_path == "":
-                embedding_model_path = os.path.join(pathlib.Path(__file__).parent.resolve(),
-                                                    "resources", "models", "embedding_model.tflite")
-
-            if ".onnx" in melspec_model_path or ".onnx" in embedding_model_path:
-                raise ValueError("The tflite inference framework is selected, but onnx models were provided!")
-
-            # Melspectrogram model
-            self.melspec_model = tflite.Interpreter(model_path=melspec_model_path, num_threads=ncpu)
-            self.melspec_model.resize_tensor_input(0, [1, 1280], strict=True)  # initialize with fixed input size
-            self.melspec_model.allocate_tensors()
-
-            melspec_input_index = self.melspec_model.get_input_details()[0]['index']
-            melspec_output_index = self.melspec_model.get_output_details()[0]['index']
-
-            self._tflite_current_melspec_input_size = 1280
-
-            def tflite_melspec_predict(x):
-                if x.shape[1] != 1280:
-                    self.melspec_model.resize_tensor_input(0, [1, x.shape[1]], strict=True)  # initialize with fixed input size
-                    self.melspec_model.allocate_tensors()
-                    self._tflite_current_melspec_input_size = x.shape[1]
-                elif self._tflite_current_melspec_input_size != 1280:
-                    self.melspec_model.resize_tensor_input(0, [1, 1280], strict=True)  # initialize with fixed input size
-                    self.melspec_model.allocate_tensors()
-                    self._tflite_current_melspec_input_size = 1280
-
-                self.melspec_model.set_tensor(melspec_input_index, x)
-                self.melspec_model.invoke()
-                return self.melspec_model.get_tensor(melspec_output_index)
-
-            self.melspec_model_predict = tflite_melspec_predict
-
-            # Audio embedding model
-            self.embedding_model = tflite.Interpreter(model_path=embedding_model_path, num_threads=ncpu)
-            self.embedding_model.allocate_tensors()
-
-            embedding_input_index = self.embedding_model.get_input_details()[0]['index']
-            embedding_output_index = self.embedding_model.get_output_details()[0]['index']
-
-            self._tflite_current_embedding_batch_size = 1
-
-            def tflite_embedding_predict(x):
-                if x.shape[0] != 1:
-                    self.embedding_model.resize_tensor_input(0, [x.shape[0], 76, 32, 1], strict=True)  # initialize with fixed input size
-                    self.embedding_model.allocate_tensors()
-                    self._tflite_current_embedding_batch_size = x.shape[0]
-                elif self._tflite_current_embedding_batch_size != 1:
-                    self.embedding_model.resize_tensor_input(0, [1, 76, 32, 1], strict=True)  # initialize with fixed input size
-                    self.embedding_model.allocate_tensors()
-                    self._tflite_current_embedding_batch_size = x.shape[0]
-
-                self.embedding_model.set_tensor(embedding_input_index, x)
-                self.embedding_model.invoke()
-                return self.embedding_model.get_tensor(embedding_output_index).squeeze()
-
-            self.embedding_model_predict = tflite_embedding_predict
+        self.embedding_model = ort.InferenceSession(embedding_model_path, sess_options=sessionOptions, providers=providers)
+        self.embedding_model_predict = lambda x: self.embedding_model.run(None, {'input_1': x})[0].squeeze()
 
         # Create databuffers with empty/random data
         self.raw_data_buffer: Deque = deque(maxlen=sr*10)
@@ -469,7 +394,7 @@ def bulk_predict(
                  wakeword_models: List[str],
                  prediction_function: str = 'predict_clip',
                  ncpu: int = 1,
-                 inference_framework: str = "tflite",
+                 inference_framework: str = "onnx",
                  **kwargs
                  ):
     """
@@ -481,10 +406,7 @@ def bulk_predict(
         prediction_function (str): The name of the method used to predict on the input audio files
                                    (default is the `predict_clip` method)
         ncpu (int): How many processes to create (up to max of available CPUs)
-        inference_framework (str): The inference framework to use when for model prediction. Options are
-                                    "tflite" or "onnx". The default is "tflite" as this results in better
-                                    efficiency on common platforms (x86, ARM64), but in some deployment
-                                    scenarios ONNX models may be preferable.
+        inference_framework (str): Only "onnx" is supported.
         kwargs (dict): Any other keyword arguments to pass to the model initialization or
                        specified prediction function
 
@@ -631,9 +553,9 @@ def download_models(
     Uses the official urls in the MODELS dictionary in openwakeword/__init__.py.
 
     Args:
-        model_names (List[str]): The names of the models to download (e.g., hey_jarvis_v0.1). Both ONNX and
-                                 tflite models will be downloaded. If not provided (the default),
-                                 the latest versions of all models will be downloaded.
+        model_names (List[str]): The names of the models to download (e.g., hey_jarvis_v0.1). Only ONNX
+                                 models are downloaded. If not provided (the default), the latest
+                                 versions of all models will be downloaded.
         target_directory (str): The directory to save the models to. Defaults to the install location
                                 of openWakeWord (i.e., the `resources/models` directory).
     Returns:
@@ -642,35 +564,28 @@ def download_models(
     if not isinstance(model_names, list):
         raise ValueError("The model_names argument must be a list of strings")
 
-    # Always download melspectrogram and embedding models, if they don't already exist
     if not os.path.exists(target_directory):
         os.makedirs(target_directory)
     for feature_model in openwakeword.FEATURE_MODELS.values():
         if not os.path.exists(os.path.join(target_directory, feature_model["download_url"].split("/")[-1])):
             download_file(feature_model["download_url"], target_directory)
-            download_file(feature_model["download_url"].replace(".tflite", ".onnx"), target_directory)
 
-    # Always download VAD models, if they don't already exist
     for vad_model in openwakeword.VAD_MODELS.values():
         if not os.path.exists(os.path.join(target_directory, vad_model["download_url"].split("/")[-1])):
             download_file(vad_model["download_url"], target_directory)
 
-    # Get all model urls
     official_model_urls = [i["download_url"] for i in openwakeword.MODELS.values()]
     official_model_names = [i["download_url"].split("/")[-1] for i in openwakeword.MODELS.values()]
 
     if model_names != []:
         for model_name in model_names:
             url = [i for i, j in zip(official_model_urls, official_model_names) if model_name in j]
-            if url != []:
-                if not os.path.exists(os.path.join(target_directory, url[0].split("/")[-1])):
-                    download_file(url[0], target_directory)
-                    download_file(url[0].replace(".tflite", ".onnx"), target_directory)
+            if url != [] and not os.path.exists(os.path.join(target_directory, url[0].split("/")[-1])):
+                download_file(url[0], target_directory)
     else:
         for official_model_url in official_model_urls:
             if not os.path.exists(os.path.join(target_directory, official_model_url.split("/")[-1])):
                 download_file(official_model_url, target_directory)
-                download_file(official_model_url.replace(".tflite", ".onnx"), target_directory)
 
 
 # Handle deprecated arguments and naming (thanks to https://stackoverflow.com/a/74564394)

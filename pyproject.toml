@@ -18,7 +18,6 @@ classifiers = [
 ]
 dependencies = [
     "onnxruntime>=1.17.0,<2",
-    'ai-edge-litert>=2.0.2,<3; platform_system == "Linux" or platform_system == "Darwin"',
     'speexdsp-ns>=0.1.2,<1; platform_system == "Linux"',
     "tqdm>=4.0,<5.0",
     "scipy>=1.11,<2",
@@ -39,13 +38,9 @@ test = [
     "mock>=5.1,<6",
     "types-mock>=5.1,<6",
 ]
-# Training extras. Works on Python 3.10–3.12.
-# - Colored-noise augmentation now uses an internal numpy implementation
-#   (replaces the unmaintained `acoustics` package, no py3.12 wheels).
-# - ONNX->TFLite conversion uses `onnx2tf` instead of the old
-#   `onnx_tf` + `tensorflow-cpu==2.8.1` stack (no py3.12 wheels).
-# - `deep-phonemizer` is opt-in (only needed for out-of-vocabulary wake words);
-#   install separately if needed.
+# Training extras. Works on Python 3.10–3.12. ONNX-only (no TFLite).
+# `deep-phonemizer` is opt-in (only needed for out-of-vocabulary wake words);
+# install separately if you need it.
 training = [
     "mutagen>=1.46.0,<2",
     "torch>=2.0,<3",
@@ -66,37 +61,6 @@ training = [
     "webrtcvad>=2.0.10,<3",
     "piper-phonemize-fix; platform_system == 'Linux'",
 ]
-# ONNX -> TFLite export only. Requires modern TensorFlow (py3.10–3.12).
-tflite-export = [
-    "onnx2tf>=1.26,<3",
-    "tensorflow>=2.16,<3",
-    "tf-keras>=2.16,<3",
-    "onnx_graphsurgeon>=0.3.27,<1",
-    "sng4onnx>=1.0.4,<2",
-    "onnxsim>=0.4.33,<1",
-]
-# Legacy training stack pinned to the original versions. Python 3.10 only.
-# Kept for exact reproducibility of pre-existing trained models.
-full-legacy = [
-    "mutagen==1.47.0",
-    "torch>=1.13.1,<2",
-    "torchaudio>=0.13.1,<1",
-    "torchinfo==1.8.0",
-    "torchmetrics==1.2.0",
-    "speechbrain==0.5.14",
-    "audiomentations==0.33.0",
-    "torch-audiomentations==0.11.0",
-    "acoustics==0.2.6",
-    "pyyaml>=6.0,<7",
-    "tensorflow-cpu==2.8.1",
-    "tensorflow_probability==0.16.0",
-    "protobuf>=3.20,<4",
-    "onnx_tf==1.10.0",
-    "onnx==1.14.0",
-    "pronouncing==0.2.0",
-    "datasets==2.14.6",
-    "deep-phonemizer==0.0.19",
-]
 
 [project.urls]
 Homepage = "https://github.com/dscripka/openWakeWord"
@@ -104,21 +68,6 @@ Homepage = "https://github.com/dscripka/openWakeWord"
 
 [tool.setuptools.packages.find]
 include = ["openwakeword*"]
-
-# `training` and `full-legacy` pin incompatible torch versions (2.x vs 1.x).
-# Declare them as mutually exclusive so `uv sync` resolves each in its own
-# split instead of trying to satisfy both at once.
-[tool.uv]
-conflicts = [
-    [
-        { extra = "training" },
-        { extra = "full-legacy" },
-    ],
-    [
-        { extra = "tflite-export" },
-        { extra = "full-legacy" },
-    ],
-]
 
 [tool.pytest.ini_options]
 addopts = "--cov=openwakeword --cov-report term-missing --flake8 --mypy --mypy-ignore-missing-imports"

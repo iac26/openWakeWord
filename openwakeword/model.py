@@ -19,7 +19,6 @@ from openwakeword.utils import AudioFeatures, re_arg
 
 import wave
 import os
-import logging
 import functools
 import pickle
 from collections import deque, defaultdict
@@ -43,13 +42,13 @@ class Model():
             vad_threshold: float = 0,
             custom_verifier_models: dict = {},
             custom_verifier_threshold: float = 0.1,
-            inference_framework: str = "tflite",
+            inference_framework: str = "onnx",
             **kwargs
             ):
         """Initialize the openWakeWord model object.
 
         Args:
-            wakeword_models (List[str]): A list of paths of ONNX/tflite models to load into the openWakeWord model object.
+            wakeword_models (List[str]): A list of paths of ONNX models to load into the openWakeWord model object.
                                               If not provided, will load all of the pre-trained models. Alternatively,
                                               just the names of pre-trained models can be provided to select a subset of models.
             class_mapping_dicts (List[dict]): A list of dictionaries with integer to string class mappings for
@@ -74,12 +73,14 @@ class Model():
                                                from a model for a given frame is greater than this value, the
                                                associated custom verifier model will also predict on that frame, and
                                                the verifier score will be returned.
-            inference_framework (str): The inference framework to use when for model prediction. Options are
-                                       "tflite" or "onnx". The default is "tflite" as this results in better
-                                       efficiency on common platforms (x86, ARM64), but in some deployment
-                                       scenarios ONNX models may be preferable.
+            inference_framework (str): Only "onnx" is supported. Kept for backwards-compatible kwargs.
             kwargs (dict): Any other keyword arguments to pass the the preprocessor instance
         """
+        if inference_framework != "onnx":
+            raise ValueError(
+                f"Unsupported inference_framework={inference_framework!r}; only 'onnx' is supported."
+            )
+
         # Get model paths for pre-trained models if user doesn't provide models to load
         pretrained_model_paths = openwakeword.get_pretrained_model_paths(inference_framework)
         wakeword_model_names = []
@@ -108,71 +109,30 @@ class Model():
         self.custom_verifier_models = {}
         self.custom_verifier_threshold = custom_verifier_threshold
 
-        # Do imports for  inference framework
-        if inference_framework == "tflite":
-            try:
-                import ai_edge_litert.interpreter as tflite
+        try:
+            import onnxruntime as ort
 
-                def tflite_predict(tflite_interpreter, input_index, output_index, x):
-                    tflite_interpreter.set_tensor(input_index, x)
-                    tflite_interpreter.invoke()
-                    return tflite_interpreter.get_tensor(output_index)[None, ]
+            def onnx_predict(onnx_model, x):
+                return onnx_model.run(None, {onnx_model.get_inputs()[0].name: x})
 
-            except ImportError:
-                logging.warning("Tried to import the tflite runtime, but it was not found. "
-                                "Trying to switching to onnxruntime instead, if appropriate models are available.")
-                if wakeword_models != [] and all(['.onnx' in i for i in wakeword_models]):
-                    inference_framework = "onnx"
-                elif wakeword_models != [] and all([os.path.exists(i.replace('.tflite', '.onnx')) for i in wakeword_models]):
-                    inference_framework = "onnx"
-                    wakeword_models = [i.replace('.tflite', '.onnx') for i in wakeword_models]
-                else:
-                    raise ValueError("Tried to import the LiteRT runtime for provided LiteRT models, but it was not found. "
-                                     "Please install it using `pip install ai-edge-litert`")
-
-        if inference_framework == "onnx":
-            try:
-                import onnxruntime as ort
-
-                def onnx_predict(onnx_model, x):
-                    return onnx_model.run(None, {onnx_model.get_inputs()[0].name: x})
-
-            except ImportError:
-                raise ValueError("Tried to import onnxruntime, but it was not found. Please install it using `pip install onnxruntime`")
+        except ImportError:
+            raise ValueError("Tried to import onnxruntime, but it was not found. Please install it using `pip install onnxruntime`")
 
         for mdl_path, mdl_name in zip(wakeword_models, wakeword_model_names):
-            # Load openwakeword models
-            if inference_framework == "onnx":
-                if ".tflite" in mdl_path:
-                    raise ValueError("The onnx inference framework is selected, but tflite models were provided!")
+            if ".tflite" in mdl_path:
+                raise ValueError("TFLite models are no longer supported; please provide ONNX models.")
 
-                sessionOptions = ort.SessionOptions()
-                sessionOptions.inter_op_num_threads = 1
-                sessionOptions.intra_op_num_threads = 1
+            sessionOptions = ort.SessionOptions()
+            sessionOptions.inter_op_num_threads = 1
+            sessionOptions.intra_op_num_threads = 1
 
-                self.models[mdl_name] = ort.InferenceSession(mdl_path, sess_options=sessionOptions,
-                                                             providers=["CPUExecutionProvider"])
+            self.models[mdl_name] = ort.InferenceSession(mdl_path, sess_options=sessionOptions,
+                                                         providers=["CPUExecutionProvider"])
 
-                self.model_inputs[mdl_name] = self.models[mdl_name].get_inputs()[0].shape[1]
-                self.model_outputs[mdl_name] = self.models[mdl_name].get_outputs()[0].shape[1]
-                pred_function = functools.partial(onnx_predict, self.models[mdl_name])
-                self.model_prediction_function[mdl_name] = pred_function
-
-            if inference_framework == "tflite":
-                if ".onnx" in mdl_path:
-                    raise ValueError("The tflite inference framework is selected, but onnx models were provided!")
-
-                self.models[mdl_name] = tflite.Interpreter(model_path=mdl_path, num_threads=1)
-                self.models[mdl_name].allocate_tensors()
-
-                self.model_inputs[mdl_name] = self.models[mdl_name].get_input_details()[0]['shape'][1]
-                self.model_outputs[mdl_name] = self.models[mdl_name].get_output_details()[0]['shape'][1]
-
-                tflite_input_index = self.models[mdl_name].get_input_details()[0]['index']
-                tflite_output_index = self.models[mdl_name].get_output_details()[0]['index']
-
-                pred_function = functools.partial(tflite_predict, self.models[mdl_name], tflite_input_index, tflite_output_index)
-                self.model_prediction_function[mdl_name] = pred_function
+            self.model_inputs[mdl_name] = self.models[mdl_name].get_inputs()[0].shape[1]
+            self.model_outputs[mdl_name] = self.models[mdl_name].get_outputs()[0].shape[1]
+            pred_function = functools.partial(onnx_predict, self.models[mdl_name])
+            self.model_prediction_function[mdl_name] = pred_function
 
             if class_mapping_dicts and class_mapping_dicts[wakeword_models.index(mdl_path)].get(mdl_name, None):
                 self.class_mapping[mdl_name] = class_mapping_dicts[wakeword_models.index(mdl_path)]

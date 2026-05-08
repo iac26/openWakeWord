@@ -5,7 +5,6 @@ import torchmetrics
 import copy
 import os
 import sys
-import tempfile
 import uuid
 import numpy as np
 import scipy
@@ -417,10 +416,10 @@ class Model(nn.Module):
         return preds
 
     def export_model(self, model, model_name, output_dir):
-        """Saves the trained openwakeword model to both onnx and tflite formats"""
+        """Saves the trained openwakeword model to ONNX format."""
 
         if self.n_classes != 1:
-            raise ValueError("Exporting models to both onnx and tflite with more than one class is currently not supported! "
+            raise ValueError("Exporting models with more than one class is currently not supported! "
                              "Use the `export_to_onnx` function instead.")
 
         # Save ONNX model
@@ -570,43 +569,6 @@ class Model(nn.Module):
                 break
 
 
-# Separate function to convert onnx models to tflite format
-def convert_onnx_to_tflite(onnx_model_path, output_path):
-    """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format.
-
-    Uses `onnx2tf` (works on Python 3.12 with modern TensorFlow) rather than the
-    old `onnx_tf` + `tensorflow==2.8.1` stack, which has no py3.12 wheels.
-    """
-    try:
-        import onnx2tf
-    except ImportError as e:
-        raise ImportError(
-            "onnx2tf is required for ONNX->TFLite conversion. "
-            "Install with: pip install 'openwakeword[tflite-export]'"
-        ) from e
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        onnx2tf.convert(
-            input_onnx_file_path=onnx_model_path,
-            output_folder_path=tmp_dir,
-            copy_onnx_input_output_names_to_tflite=True,
-            non_verbose=True,
-        )
-        # onnx2tf writes <model_basename>_float32.tflite by default
-        produced = os.path.join(tmp_dir, os.path.splitext(os.path.basename(onnx_model_path))[0] + "_float32.tflite")
-        if not os.path.exists(produced):
-            candidates = [f for f in os.listdir(tmp_dir) if f.endswith("_float32.tflite")]
-            if not candidates:
-                raise RuntimeError(f"onnx2tf did not produce a tflite file in {tmp_dir}")
-            produced = os.path.join(tmp_dir, candidates[0])
-
-        logging.info(f"####\nSaving tflite mode to '{output_path}'")
-        with open(produced, "rb") as src, open(output_path, "wb") as dst:
-            dst.write(src.read())
-
-    return None
-
-
 if __name__ == '__main__':
     # Get training config file
     parser = argparse.ArgumentParser()
@@ -644,14 +606,6 @@ if __name__ == '__main__':
         default="False",
         required=False
     )
-    parser.add_argument(
-        "--convert_to_tflite",
-        help="Convert the trained ONNX model to TFLite format",
-        action="store_true",
-        default="False",
-        required=False
-    )
-
     args = parser.parse_args()
     config = yaml.load(open(args.training_config, 'r').read(), yaml.Loader)
 
@@ -917,8 +871,3 @@ if __name__ == '__main__':
 
         # Export the trained model to onnx
         oww.export_model(model=best_model, model_name=config["model_name"], output_dir=config["output_dir"])
-
-        # Convert the model from onnx to tflite format
-        if args.convert_to_tflite:
-            convert_onnx_to_tflite(os.path.join(config["output_dir"], config["model_name"] + ".onnx"),
-                                   os.path.join(config["output_dir"], config["model_name"] + ".tflite"))

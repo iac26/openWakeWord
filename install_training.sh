@@ -17,7 +17,6 @@
 #   source $VENV/bin/activate
 #   python -m openwakeword.train --training_config <your.yml> \
 #       --generate_clips --augment_clips --train_model
-# (Do NOT pass --convert_to_tflite; this script intentionally skips TFLite deps.)
 
 set -euo pipefail
 
@@ -167,7 +166,7 @@ Next steps:
      - 'feature_data_files' at $WORKDIR/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy
      - 'false_positive_validation_data_path' at $WORKDIR/features/validation_set_features.npy
      - 'background_paths' at directories of 16 kHz WAVs (AudioSet/FSD50k/FMA)
-  3. Run (no --convert_to_tflite — ONNX only):
+  3. Run:
        python -m openwakeword.train --training_config your_config.yml \\
          --generate_clips --augment_clips --train_model
 

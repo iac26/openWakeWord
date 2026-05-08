@@ -57,14 +57,6 @@ class TestModels:
         prediction = owwModel.predict(np.random.randint(-1000, 1000, 1280).astype(np.int16))
         assert prediction["alexa_v0.1"] >= 0 and prediction["alexa_v0.1"] <= 1
 
-        owwModel = openwakeword.Model(wakeword_models=[
-                                        os.path.join("openwakeword", "resources", "models", "alexa_v0.1.tflite")
-                                      ], inference_framework="tflite")
-
-        # Prediction on random data
-        prediction = owwModel.predict(np.random.randint(-1000, 1000, 1280).astype(np.int16))
-        assert prediction["alexa_v0.1"] >= 0 and prediction["alexa_v0.1"] <= 1
-
     def test_predict_with_different_frame_sizes(self):
         # Test with binary model
         owwModel1 = openwakeword.Model(wakeword_models=[
@@ -106,9 +98,9 @@ class TestModels:
                                                 os.path.join("openwakeword", "resources", "models", "alexa_v0.1.onnx")
                                             ], inference_framework="onnx")
 
-        with mock.patch.dict(sys.modules, {'tflite_runtime': None}):
+        with pytest.raises(ValueError):
             openwakeword.Model(wakeword_models=[
-                                            os.path.join("openwakeword", "resources", "models", "alexa_v0.1.tflite")
+                                            os.path.join("openwakeword", "resources", "models", "alexa_v0.1.onnx")
                                         ], inference_framework="tflite")
 
     def test_predict_with_custom_verifier_model(self):
@@ -130,8 +122,6 @@ class TestModels:
     def test_load_pretrained_model_by_name(self):
         # Load model with defaults
         owwModel = openwakeword.Model(wakeword_models=["alexa", "hey mycroft"], inference_framework="onnx")
-
-        owwModel = openwakeword.Model(wakeword_models=["alexa", "hey mycroft"], inference_framework="tflite")
 
         # Prediction on random data
         owwModel.predict(np.random.randint(-1000, 1000, 1280).astype(np.int16))
