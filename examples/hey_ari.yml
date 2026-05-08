@@ -11,9 +11,10 @@ target_phrase:
 # practice (e.g. "hey aria", "hairy", etc.).
 custom_negative_phrases: []
 
-# Synthetic positives. 50k is a reasonable middle ground; bump to 100k+ for
-# best accuracy if your GPU has the time.
-n_samples: 50000
+# Synthetic positives. 100k matches the upstream alexa/hey_mycroft training
+# scale; lower this only if you're tight on GPU time. Going below 30k
+# noticeably hurts recall.
+n_samples: 100000
 n_samples_val: 2000
 
 # tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).
@@ -54,8 +55,14 @@ batch_n_per_class:
   "positive": 50
 
 model_type: "dnn"
-layer_size: 32
+# layer_size 128 matches upstream alexa/hey_mycroft (~214k params, ~830 KB
+# ONNX). The default 32 we had earlier produces a 50k-param model the size
+# of hey_rhasspy — too small for a custom wake word with this much data.
+# n_blocks defaults to 1 (one FCNBlock after the input layer); upstream
+# models also use n_blocks=1.
+layer_size: 128
 
-steps: 50000
+# 100k steps lets the larger model fully converge with the larger dataset.
+steps: 100000
 max_negative_weight: 1500
 target_false_positives_per_hour: 0.2
