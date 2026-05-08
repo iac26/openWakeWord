@@ -19,7 +19,7 @@ verifier_for: "hey_ari"
 # Real-audio data — to be collected.
 # ---------------------------------------------------------------------
 # Positives: recordings of real people saying "hey ari" in deployment-like
-# conditions (Realwear mic, target rooms, target users). Each clip ~1s,
+# conditions (deployment mic, target rooms, target users). Each clip ~1s,
 # trimmed around the utterance. Aim:
 #   - 50-100 clips for prototype tier
 #   - 300-500 for a reliable single-device verifier

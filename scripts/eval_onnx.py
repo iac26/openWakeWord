@@ -26,16 +26,34 @@ FRAME_SECONDS = 0.08  # one openwakeword embedding frame
 
 
 def run_onnx(session: ort.InferenceSession, X: np.ndarray, batch_size: int = 256) -> np.ndarray:
-    """Run an onnx session on (N, 16, 96) features in batches; return scores in (N,)."""
+    """Run an onnx session on (N, 16, 96) features in batches; return scores in (N,).
+
+    If the model was exported with a fixed batch dimension (older openwakeword
+    .onnx files), fall back to batch_size=1 so we can still evaluate them.
+    """
     if X.ndim != 3:
         raise ValueError(f"Expected (N, 16, 96), got {X.shape}")
     out_name = session.get_outputs()[0].name
     in_name = session.get_inputs()[0].name
+
+    # Detect a fixed batch size on the input.
+    in_dim0 = session.get_inputs()[0].shape[0]
+    if isinstance(in_dim0, int) and in_dim0 > 0:
+        batch_size = in_dim0  # respect the model's hardcoded batch
+
     parts = []
     for i in range(0, X.shape[0], batch_size):
         chunk = X[i:i + batch_size].astype(np.float32, copy=False)
-        scores = session.run([out_name], {in_name: chunk})[0]
-        parts.append(np.asarray(scores).reshape(-1))
+        if isinstance(in_dim0, int) and in_dim0 > 0 and chunk.shape[0] != in_dim0:
+            # Pad the trailing partial chunk so it matches the fixed batch size,
+            # then drop the padded predictions afterwards.
+            pad = in_dim0 - chunk.shape[0]
+            chunk = np.concatenate([chunk, np.zeros((pad,) + chunk.shape[1:], dtype=chunk.dtype)])
+            scores = session.run([out_name], {in_name: chunk})[0]
+            parts.append(np.asarray(scores).reshape(-1)[:in_dim0 - pad])
+        else:
+            scores = session.run([out_name], {in_name: chunk})[0]
+            parts.append(np.asarray(scores).reshape(-1))
     return np.concatenate(parts)
 
 

@@ -158,3 +158,4 @@ openwakeword/resources/
 # Training workspace created by install_training.sh / prepare_datasets.py
 training_workspace/
 
+training_workspace_local/
