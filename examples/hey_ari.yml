@@ -91,16 +91,24 @@ n_heads: 4
 n_conv: 2     # number of Conv1D(kernel=3) blocks
 n_attn: 1     # number of MultiheadAttention blocks (residual + LayerNorm)
 
-# Focal loss focuses gradient on hard examples; gamma=2 is the value from
-# the original paper. Combined with the existing high-loss filter, this
-# pushes more capacity toward the long tail of confusable negatives.
+# Focal loss focuses gradient on hard examples. gamma=2 (livekit default)
+# down-weights correctly-classified positives by (1-p)^2 — at p=0.7 the
+# gradient is only 9% of plain BCE, so the optimizer stops pushing the
+# score higher even though it could. That compresses the output
+# distribution and forces a low deployment threshold. gamma=1 keeps the
+# hard-example focus but the down-weighting is much gentler so easy
+# positives keep climbing toward 1.0.
 loss_type: "focal"
-focal_gamma: 2.0
+focal_gamma: 1.0
 
-# Embedding mixup: linearly interpolate (x, y) pairs in the pre-computed
-# embedding space at training time. Acts as a regularizer and produces
-# sharper score distributions at inference.
-embedding_mixup: true
+# Embedding mixup interpolates (x, y) pairs at training time, which
+# produces SOFT labels — the model never sees a target of 1.0 for a
+# 50%-mixed input and so never learns to confidently predict 1.0.
+# Disabled because we want sharp scores on real audio at deployment;
+# the regularization benefit is marginal compared to the calibration
+# cost. Re-enable with a very small alpha (e.g. 0.05) if you start
+# seeing overfitting symptoms.
+embedding_mixup: false
 mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.
