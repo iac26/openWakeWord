@@ -1,0 +1,86 @@
+# Training config for the "hey ari" VERIFIER model.
+#
+# A verifier is a small second-stage classifier that runs only when the
+# primary wake-word model fires (score >= primary_threshold). Its only
+# job is to decide whether the clip the primary accepted is actually
+# "hey ari" or one of the things that fool the primary. Output of the
+# fused ONNX is the verifier's score when the primary fires, otherwise
+# the primary's score — same shape as hey_jarvis_v0.1.onnx.
+#
+# Status: NOT YET RUNNABLE. The training + fusion scripts referenced
+# below don't exist yet. This file documents the intended configuration
+# so we can build the scripts against a concrete spec once real-audio
+# data is in hand.
+
+model_name: "hey_ari_verifier"
+verifier_for: "hey_ari"
+
+# ---------------------------------------------------------------------
+# Real-audio data — to be collected.
+# ---------------------------------------------------------------------
+# Positives: recordings of real people saying "hey ari" in deployment-like
+# conditions (Realwear mic, target rooms, target users). Each clip ~1s,
+# trimmed around the utterance. Aim:
+#   - 50-100 clips for prototype tier
+#   - 300-500 for a reliable single-device verifier
+#   - 2000+ for cross-user/environment robustness
+# Diversity matters more than volume: 5+ voices, 2+ rooms, varied
+# background levels.
+positive_audio_dir: "./training_workspace/verifier_data/hey_ari/positives"
+
+# Hard negatives: clips where the trained PRIMARY fired but the user
+# wasn't actually saying "hey ari". Mine these by running the primary
+# on hours of background audio in the deployment environment and saving
+# every trigger. Hand-verify (or assume all are negatives if the recordist
+# wasn't speaking the wake word). These are the exact things the verifier
+# needs to learn to reject — without them the verifier is useless.
+# Aim for at least 2x the positive count.
+hard_negative_audio_dir: "./training_workspace/verifier_data/hey_ari/hard_negatives"
+
+# ---------------------------------------------------------------------
+# Augmentation. Heavier than the primary because the dataset is small.
+# ---------------------------------------------------------------------
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+# Each real clip gets re-augmented N times per epoch to compensate for
+# small dataset size.
+augmentation_rounds: 4
+
+# ---------------------------------------------------------------------
+# Architecture. Small MLP over mean-pooled embeddings.
+#   (B, 16, 96) -> mean over time -> (B, 96)
+#   Linear(96 -> hidden_dim) -> ReLU
+#   Linear(hidden_dim -> 1)  -> Sigmoid
+# ~6.5k params at hidden_dim=64. Match the primary architecture
+# (conv_attention, layer_size 128) only once positive count is in the
+# 500+ range; otherwise the verifier overfits.
+# ---------------------------------------------------------------------
+model_type: "verifier_mlp"
+hidden_dim: 64
+
+# ---------------------------------------------------------------------
+# Training schedule. Verifier is tiny and data is small; converges fast.
+# ---------------------------------------------------------------------
+batch_size: 32
+steps: 5000
+lr: 0.0005
+
+# Plain BCE — the dataset is balanced (~1:2 pos:neg), so focal loss
+# isn't needed.
+loss_type: "bce"
+
+# ---------------------------------------------------------------------
+# Fusion with primary. Produces a single .onnx file with an If-node
+# gating the verifier on primary score >= primary_threshold, mirroring
+# hey_jarvis_v0.1.onnx exactly.
+# ---------------------------------------------------------------------
+primary_onnx: "./training_workspace/output/hey_ari.onnx"
+primary_threshold: 0.5
+fused_output_path: "./training_workspace/output/hey_ari_fused.onnx"
+
+# Optional: apply the same inference_temperature to the verifier's
+# sigmoid output for visibly sharp scores. The primary already has its
+# own temperature baked in from primary training; this is independent.
+inference_temperature: 1.0

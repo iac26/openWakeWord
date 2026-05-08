@@ -1,0 +1,40 @@
+# Training config for the "decline" VERIFIER model.
+# See hey_ari_verifier.yml for full rationale and structure.
+# Status: NOT YET RUNNABLE — scaffolding only.
+
+model_name: "decline_verifier"
+verifier_for: "decline"
+
+# ---------------------------------------------------------------------
+# Real-audio data — to be collected.
+# ---------------------------------------------------------------------
+# Positives: real recordings of "decline" said as a rejection.
+positive_audio_dir: "./training_workspace/verifier_data/decline/positives"
+
+# Hard negatives: clips where the trained "decline" primary fired but
+# the user wasn't saying "decline". CRITICAL: include "accept" clips
+# the decline primary fired on — the two confirmation models are most
+# likely to fool each other. Also include phonetic neighbours
+# ("incline", "recline", "deny") if the primary triggered on them.
+hard_negative_audio_dir: "./training_workspace/verifier_data/decline/hard_negatives"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+augmentation_rounds: 4
+
+model_type: "verifier_mlp"
+hidden_dim: 64
+
+batch_size: 32
+steps: 5000
+lr: 0.0005
+
+loss_type: "bce"
+
+primary_onnx: "./training_workspace/output/decline.onnx"
+primary_threshold: 0.5
+fused_output_path: "./training_workspace/output/decline_fused.onnx"
+
+inference_temperature: 1.0
