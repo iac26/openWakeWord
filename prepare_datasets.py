@@ -181,7 +181,11 @@ def download_fma(out_dir: Path, n_hours: float) -> None:
     n_clips = int(n_hours * 3600 / 30)
     _section(f"FMA -> {out_dir} ({n_clips} clips, ~{n_hours:.1f} h)")
 
-    ds = datasets.load_dataset("rudraml/fma", name="small", split="train", streaming=True)
+    # rudraml/fma ships a loading script (custom code); explicit opt-in required
+    # since `datasets` 2.16+. Inspect at https://hf.co/datasets/rudraml/fma.
+    ds = datasets.load_dataset(
+        "rudraml/fma", name="small", split="train", streaming=True, trust_remote_code=True,
+    )
     ds = iter(ds.cast_column("audio", datasets.Audio(sampling_rate=TARGET_SR)))
 
     for i in tqdm(range(n_clips), desc="fma", bar_format=_BAR_FMT, unit="clip"):

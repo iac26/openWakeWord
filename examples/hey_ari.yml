@@ -44,10 +44,13 @@ augmentation_rounds: 1
 feature_data_files:
   "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 
+# Upstream defaults. These set per-step gradient batch shape, so changing
+# them changes training dynamics (effective LR, convergence). Leave as-is
+# to keep training behaviour equivalent to upstream openwakeword.
 batch_n_per_class:
-  "ACAV100M_sample": 16384
-  "adversarial_negative": 1000
-  "positive": 1000
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
 
 model_type: "dnn"
 layer_size: 32
