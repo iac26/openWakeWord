@@ -686,38 +686,40 @@ def augment_clips(
             torch_audiomentations.Gain(max_gain_in_db=0, p=augmentation_probabilities["Gain"]),
         ])
 
+    # Worker that handles disk I/O + CPU augment1 for a single clip. Run
+    # these in a ThreadPool so torchaudio.load (libsndfile) and the
+    # numpy/scipy ops in audiomentations overlap across CPU cores instead
+    # of running serially per batch.
+    def _prep_clip(clip):
+        clip_data, clip_sr = torchaudio.load(clip)
+        if clip_sr != sr:
+            raise ValueError("Error! Clip does not have the correct sample rate!")
+        clip_data = clip_data[0]
+        if clip_data.shape[0] > total_length:
+            clip_data = clip_data[0:total_length]
+        clip_data = create_fixed_size_clip(clip_data, total_length, clip_sr)
+        samples = np.asarray(clip_data, dtype=np.float32)
+        return torch.from_numpy(augment1(samples=samples, sample_rate=sr))
+
+    n_workers = max(1, (os.cpu_count() or 4) - 1)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
     # Iterate through all clips and augment them
-    for i in range(0, len(clip_paths), batch_size):
-        batch = clip_paths[i:i+batch_size]
-        augmented_clips = []
-        for clip in batch:
-            clip_data, clip_sr = torchaudio.load(clip)
-            clip_data = clip_data[0]
-            if clip_data.shape[0] > total_length:
-                clip_data = clip_data[0:total_length]
+    with ThreadPool(processes=n_workers) as pool:
+        for i in range(0, len(clip_paths), batch_size):
+            batch = clip_paths[i:i+batch_size]
+            augmented_clips = list(pool.imap(_prep_clip, batch, chunksize=max(1, len(batch) // n_workers)))
 
-            if clip_sr != sr:
-                raise ValueError("Error! Clip does not have the correct sample rate!")
+            # Do second pass augmentations on GPU as a single batched call
+            augmented_batch = augment2(samples=torch.vstack(augmented_clips).unsqueeze(dim=1).to(device), sample_rate=sr).squeeze(axis=1)
 
-            clip_data = create_fixed_size_clip(clip_data, total_length, clip_sr)
+            # Do reverberation
+            if augmentation_probabilities["RIR"] >= np.random.random() and RIR_paths != []:
+                rir_waveform, _ = torchaudio.load(random.choice(RIR_paths))
+                augmented_batch = reverberate(augmented_batch.cpu(), rir_waveform, rescale_amp="avg")
 
-            # Do first pass augmentations. audiomentations expects float32
-            # numpy; torchaudio.load gives float32 tensors but downstream slicing
-            # can promote to float64, so cast explicitly.
-            samples = np.asarray(clip_data, dtype=np.float32)
-            augmented_clips.append(torch.from_numpy(augment1(samples=samples, sample_rate=sr)))
-
-        # Do second pass augmentations
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        augmented_batch = augment2(samples=torch.vstack(augmented_clips).unsqueeze(dim=1).to(device), sample_rate=sr).squeeze(axis=1)
-
-        # Do reverberation
-        if augmentation_probabilities["RIR"] >= np.random.random() and RIR_paths != []:
-            rir_waveform, sr = torchaudio.load(random.choice(RIR_paths))
-            augmented_batch = reverberate(augmented_batch.cpu(), rir_waveform, rescale_amp="avg")
-
-        # yield batch of 16-bit PCM audio data
-        yield (augmented_batch.cpu().numpy()*32767).astype(np.int16)
+            # yield batch of 16-bit PCM audio data
+            yield (augmented_batch.cpu().numpy()*32767).astype(np.int16)
 
 
 def create_fixed_size_clip(x, n_samples, sr=16000, start=None, end_jitter=.200):

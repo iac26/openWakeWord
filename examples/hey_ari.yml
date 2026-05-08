@@ -19,7 +19,11 @@ n_samples_val: 2000
 # Tuned for a high-VRAM (~48 GB) cloud GPU. Drop these if running on a
 # smaller card (e.g. 4 GB local: tts_batch_size 32, augmentation_batch_size 32).
 tts_batch_size: 256
-augmentation_batch_size: 256
+# augmentation_batch_size has weak GPU scaling because the per-clip CPU
+# prep (load + audiomentations) was previously serial. The current code
+# parallelises it across CPU cores via a ThreadPool, so 64 keeps batches
+# small enough to overlap CPU prep with GPU augment2/embedding.
+augmentation_batch_size: 64
 
 piper_sample_generator_path: "./training_workspace/piper-sample-generator"
 output_dir: "./training_workspace/output"
