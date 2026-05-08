@@ -456,14 +456,21 @@ class Model(nn.Module):
         return t, recall, fpph
 
     def auto_train(self, X_train, X_val, false_positive_val_data, steps=50000, max_negative_weight=1000,
-                   target_fp_per_hour=0.2):
+                   target_fp_per_hour=0.2, val_set_hrs=None):
         """A sequence of training steps that produce relatively strong models
         automatically, based on validation data and performance targets provided.
         After training merges the best checkpoints and returns a single model.
-        """
 
-        # Get false positive validation data duration
-        val_set_hrs = 11.3
+        val_set_hrs: total hours of audio represented by false_positive_val_data.
+        Required for FP/hr to be meaningful — was previously hardcoded to 11.3
+        (the upstream openWakeWord val set), which made FP/hr nonsensical for
+        any other val source. Caller must pass this; we no longer default it.
+        """
+        if val_set_hrs is None:
+            raise ValueError(
+                "val_set_hrs is required (hours of audio in false_positive_val_data). "
+                "Compute it from the source .npy: n_frames * 0.08 / 3600."
+            )
 
         # Sequence 1: bulk training. Job is to converge the model into the
         # right basin; checkpoints from this phase are NOT collected for the
@@ -1235,6 +1242,16 @@ if __name__ == '__main__':
         VAL_BATCH = 256
 
         X_val_fp = np.load(config["false_positive_validation_data_path"])
+        # Each row = one 80 ms openwakeword embedding frame. Total audio
+        # duration = n_frames * 0.08 s; convert to hours for FP/hr math.
+        # Previously hardcoded to 11.3 (the upstream val set), which made
+        # FP/hr meaningless for any other source.
+        FRAME_SECONDS = 0.08
+        val_set_hrs = X_val_fp.shape[0] * FRAME_SECONDS / 3600.0
+        logging.info(
+            "False-positive validation set: %d frames -> %.3f hours of audio",
+            X_val_fp.shape[0], val_set_hrs,
+        )
         X_val_fp = np.array([X_val_fp[i:i+input_shape[0]] for i in range(0, X_val_fp.shape[0]-input_shape[0], 1)])  # reshape to match model
         X_val_fp_labels = np.zeros(X_val_fp.shape[0]).astype(np.float32)
         X_val_fp = torch.utils.data.DataLoader(
@@ -1262,6 +1279,7 @@ if __name__ == '__main__':
             steps=config["steps"],
             max_negative_weight=config["max_negative_weight"],
             target_fp_per_hour=config["target_false_positives_per_hour"],
+            val_set_hrs=val_set_hrs,
         )
 
         # Export the trained model to onnx. Optional inference_temperature
