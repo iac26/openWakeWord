@@ -10,27 +10,27 @@ model_name: "hey_ari"
 # per variant.
 target_phrase:
   - "hey ari"
-  - "hi ari"
 
-# Phrases that sound similar to the wake words but should NOT trigger.
-# Each is synthesised into TTS clips and used as adversarial negatives —
-# the model learns to reject them. Add anything you see triggering
-# false positives in practice.
-custom_negative_phrases:
-  - "hey aria"
-  - "hi aria"
-  - "hey harry"
-  - "hi harry"
-  - "hairy"
-  - "area"
-  - "airy"
-  - "hey area"
-  - "hi area"
+# Hand-curated phrases the model should reject. Keep this list short and
+# only include phrases whose TTS audio is *clearly different* from the
+# wake word — items like "hey aria" or "hey area" differ from "hey ari"
+# by 50-100 ms of trailing audio in synthesis, and training on them
+# makes the model over-picky on the final phoneme of the real phrase
+# (causing under-firing on real users).
+#
+# generate_adversarial_texts already produces phonetic neighbours
+# automatically (with include_input_words=0.0 so they don't share words
+# with the target). That covers the "near-rhyme" space.
+#
+# Use this list only for: (a) common names/words you've observed
+# triggering FPs in deployment, and (b) the *other* command word(s) in
+# the system so models don't fire on each other.
+custom_negative_phrases: []
 
 # Synthetic positives. 200k = ~100k per phrase variant, matching the
 # upstream alexa/hey_mycroft per-phrase training scale. Going below ~30k
 # per variant noticeably hurts recall.
-n_samples: 200000
+n_samples: 100000
 n_samples_val: 4000
 
 # tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).

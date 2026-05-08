@@ -778,7 +778,7 @@ if __name__ == '__main__':
             generate_samples(
                 text=config["target_phrase"], max_samples=config["n_samples"]-n_current_samples,
                 batch_size=config["tts_batch_size"],
-                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
+                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                 output_dir=positive_train_output_dir, auto_reduce_batch_size=True,
                 file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
             )
@@ -794,7 +794,7 @@ if __name__ == '__main__':
         if n_current_samples <= 0.95*config["n_samples_val"]:
             generate_samples(text=config["target_phrase"], max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"],
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=positive_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:
@@ -821,7 +821,7 @@ if __name__ == '__main__':
                     include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
+                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=negative_train_output_dir, auto_reduce_batch_size=True,
                              file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
                              )
@@ -850,7 +850,7 @@ if __name__ == '__main__':
                     include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=negative_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:

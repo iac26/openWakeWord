@@ -604,8 +604,12 @@ class _PerClipAugDataset(torch.utils.data.Dataset):
                 # length_scales buckets. Real users speak at arbitrary
                 # speeds; without this the model overfits to the synthetic
                 # phoneme-duration grid and only fires at "the right speed".
+                # Range is biased toward fast (2x) since real users say
+                # short wake words quickly more often than they drag them
+                # out; lower bound 0.75x catches slower deliberate speech
+                # without going into uncomfortably-slow territory.
                 audiomentations.TimeStretch(
-                    min_rate=0.85, max_rate=1.2,
+                    min_rate=0.75, max_rate=2.0,
                     p=self.aug_probs.get("TimeStretch", 0.4),
                     leave_length_unchanged=True),
             ])
