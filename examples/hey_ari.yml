@@ -10,27 +10,33 @@ model_name: "hey_ari"
 # per variant.
 target_phrase:
   - "hey ari"
-  - "hi ari"
 
-# Phrases that sound similar to the wake words but should NOT trigger.
-# Each is synthesised into TTS clips and used as adversarial negatives —
-# the model learns to reject them. Add anything you see triggering
-# false positives in practice.
+# Custom negative phrases should be CLEARLY DIFFERENT from the wake word
+# — common phrases the system might encounter, NOT phonetic neighbours.
+#
+# Source: openWakeWord upstream evaluations (Neural Engineer / dscripka).
+# Verbatim guidance: "training on phonetically similar phrases like
+# 'hey call' or 'hey carl' actually hurts performance, and only clearly
+# different phrases like 'hello', 'hey siri', 'alexa' should be used".
+# Phonetic near-rhymes are already produced automatically by
+# generate_adversarial_texts; that's where 'hey jealous' came from in
+# the official hey_jarvis training set, NOT from a curated list.
+#
+# Add real false-positive triggers observed in deployment after the
+# initial model is in use.
 custom_negative_phrases:
-  - "hey aria"
-  - "hi aria"
-  - "hey harry"
-  - "hi harry"
-  - "hairy"
-  - "area"
-  - "airy"
-  - "hey area"
-  - "hi area"
+  - "hello"
+  - "hey siri"
+  - "alexa"
+  - "ok google"
+  - "hey google"
+  - "computer"
+  - "hey jarvis"
 
 # Synthetic positives. 200k = ~100k per phrase variant, matching the
 # upstream alexa/hey_mycroft per-phrase training scale. Going below ~30k
 # per variant noticeably hurts recall.
-n_samples: 200000
+n_samples: 100000
 n_samples_val: 4000
 
 # tts_batch_size benefits from a big GPU (Piper synthesis is GPU-bound).
@@ -85,19 +91,35 @@ n_heads: 4
 n_conv: 2     # number of Conv1D(kernel=3) blocks
 n_attn: 1     # number of MultiheadAttention blocks (residual + LayerNorm)
 
-# Focal loss focuses gradient on hard examples; gamma=2 is the value from
-# the original paper. Combined with the existing high-loss filter, this
-# pushes more capacity toward the long tail of confusable negatives.
+# Focal loss + embedding mixup as published by livekit-wakeword. We
+# briefly tried gamma=1 + mixup off to push trained scores past ~0.6;
+# that hurt the model on real audio enough to be worse overall. Back to
+# the upstream defaults. If we want sharper post-hoc scores, do it with
+# temperature scaling at inference rather than by weakening the loss.
 loss_type: "focal"
 focal_gamma: 2.0
-
-# Embedding mixup: linearly interpolate (x, y) pairs in the pre-computed
-# embedding space at training time. Acts as a regularizer and produces
-# sharper score distributions at inference.
 embedding_mixup: true
 mixup_alpha: 0.2
 
+# Post-hoc temperature scaling baked into the exported ONNX:
+#   s' = sigmoid(T * logit(s))
+# Focal loss + mixup leave real-audio scores capped around ~0.55. T=11
+# maps 0.55 -> ~0.9 while keeping 0.5 fixed, so the natural deployment
+# threshold stays at 0.5 and crossings are sharper. Set to 1.0 to disable.
+# Note: hey_jarvis_v0.1 achieves its 0.9 deployment scores via a fused
+# verifier model, not temperature scaling — that needs real-audio data
+# we don't have yet. This is the no-data substitute.
+inference_temperature: 11.0
+
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
-max_negative_weight: 1500
-target_false_positives_per_hour: 0.2
+
+# auto_train ramps negative weight from 1 to max_negative_weight over
+# sequence 1, then doubles it each subsequent sequence if FP rate is still
+# above target. With the default 1500 + adversarial-negatives that include
+# input words (now disabled), the gradient was so heavily skewed against
+# negatives that the model under-fired on the real phrase. 750 + relaxed
+# FP target loosens that pressure; the focal loss + better adversarial
+# generation handle the tail.
+max_negative_weight: 750
+target_false_positives_per_hour: 0.5

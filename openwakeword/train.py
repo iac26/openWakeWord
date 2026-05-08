@@ -291,16 +291,22 @@ class Model(nn.Module):
         averaged_model = copy.deepcopy(models[0])
         averaged_model_dict = averaged_model.state_dict()
 
-        # Initialize a running total of the weights
-        for key in averaged_model_dict:
-            averaged_model_dict[key] *= 0  # set to 0
+        # Only average float buffers/parameters. Integer buffers (e.g.
+        # BatchNorm's num_batches_tracked, which conv_attention introduces)
+        # can't be divided in-place and aren't meaningful to average — keep
+        # them from models[0].
+        avg_keys = [k for k, v in averaged_model_dict.items()
+                    if v.is_floating_point()]
+
+        for key in avg_keys:
+            averaged_model_dict[key] *= 0
 
         for model in models:
             model_dict = model.state_dict()
-            for key, value in model_dict.items():
-                averaged_model_dict[key] += value
+            for key in avg_keys:
+                averaged_model_dict[key] += model_dict[key]
 
-        for key in averaged_model_dict:
+        for key in avg_keys:
             averaged_model_dict[key] /= len(models)
 
         # Load the averaged weights into the model
@@ -319,12 +325,15 @@ class Model(nn.Module):
         Returns:
             list: A list of the top n models
         """
-        # Get false positive rates for each model
+        # Get false positive rates for each model. Single tqdm over batches:
+        # the previous structure put tqdm on the inner model loop, which
+        # restarted the bar for every batch and looked like an infinite
+        # loop on large false_positive_validate_data sets.
         false_positive_rates = [0]*len(self.best_models)
-        for batch in false_positive_validate_data:
+        for batch in tqdm(false_positive_validate_data,
+                          desc="Find best checkpoints by false positive rate"):
             x_val, y_val = batch[0].to(self.device), batch[1].to(self.device)
-            for mdl_ndx, model in tqdm(enumerate(self.best_models), total=len(self.best_models),
-                                       desc="Find best checkpoints by false positive rate"):
+            for mdl_ndx, model in enumerate(self.best_models):
                 with torch.no_grad():
                     val_ps = model(x_val)
                     false_positive_rates[mdl_ndx] = false_positive_rates[mdl_ndx] + self.fp(val_ps, y_val[..., None]).detach().cpu().numpy()
@@ -332,6 +341,9 @@ class Model(nn.Module):
 
         candidate_model_ndx = [ndx for ndx, fp in enumerate(false_positive_rates) if fp <= max_fp_per_hour]
         candidate_model_recall = [self.best_model_scores[ndx]["val_recall"] for ndx in candidate_model_ndx]
+        if not candidate_model_recall:
+            logging.warning(f"No checkpoints had FP/hr <= {max_fp_per_hour}!")
+            return None
         if max(candidate_model_recall) <= min_recall:
             logging.warning(f"No models with recall >= {min_recall} found!")
             return None
@@ -409,30 +421,37 @@ class Model(nn.Module):
                     val_steps=val_steps, warmup_steps=steps//5,
                     hold_steps=steps//3, lr=lr, val_set_hrs=val_set_hrs)
 
-        # Merge best models
-        logging.info("Merging checkpoints above the 90th percentile into single model...")
-        accuracy_percentile = np.percentile(self.history["val_accuracy"], 90)
-        recall_percentile = np.percentile(self.history["val_recall"], 90)
-        fp_percentile = np.percentile(self.history["val_fp_per_hr"], 10)
-
-        # Get models above the 90th percentile
-        models = []
-        for model, score in zip(self.best_models, self.best_model_scores):
-            if score["val_accuracy"] >= accuracy_percentile and \
-                    score["val_recall"] >= recall_percentile and \
-                    score["val_fp_per_hr"] <= fp_percentile:
-                models.append(model)
-
-        if len(models) > 0:
-            combined_model = self.average_models(models=models)
-        else:
+        # Pick a single best checkpoint instead of averaging weights across
+        # the three LR sequences. For the conv_attention head (BatchNorm +
+        # MultiheadAttention), averaging running stats and attention weights
+        # from very different training stages (LR 1e-4, 1e-5, 1e-6) tended to
+        # smear the model and produce a worse final artifact than any single
+        # checkpoint. Highest-recall checkpoint with FP <= target wins; fall
+        # back to the running self.model if nothing qualifies.
+        logging.info("Selecting single best checkpoint by FP/recall...")
+        combined_model = self._select_best_model(
+            false_positive_validate_data=false_positive_val_data,
+            val_set_hrs=val_set_hrs,
+            max_fp_per_hour=target_fp_per_hour,
+            min_recall=0.20,
+        )
+        if combined_model is None:
+            logging.warning("No checkpoint met the FP/recall bar; falling back "
+                            "to the final-step model.")
             combined_model = self.model
 
-        # Report validation metrics for combined model
+        # Report validation metrics for combined model. Accumulate preds+labels
+        # across all val batches; computing the metric from only the last batch
+        # (the previous behaviour) gave nonsense recall/accuracy on small final
+        # batches.
         with torch.no_grad():
+            all_preds, all_labels = [], []
             for batch in X_val:
                 x, y = batch[0].to(self.device), batch[1].to(self.device)
-                val_ps = combined_model(x)
+                all_preds.append(combined_model(x))
+                all_labels.append(y)
+            val_ps = torch.cat(all_preds)
+            y = torch.cat(all_labels)
 
             combined_model_recall = self.recall(val_ps, y[..., None]).detach().cpu().numpy()
             combined_model_accuracy = self.accuracy(val_ps, y[..., None].to(torch.int64)).detach().cpu().numpy()
@@ -502,12 +521,36 @@ class Model(nn.Module):
 
         return preds
 
-    def export_model(self, model, model_name, output_dir):
-        """Saves the trained openwakeword model to ONNX format."""
+    def export_model(self, model, model_name, output_dir, temperature=1.0):
+        """Saves the trained openwakeword model to ONNX format.
+
+        temperature > 1 sharpens the output distribution at inference time
+        without retraining: s' = sigmoid(T * logit(s)). Useful when focal
+        loss + mixup leave real-audio scores capped around ~0.55; T≈11 maps
+        0.55 -> 0.9 while keeping the natural threshold at 0.5. T=1.0 (the
+        default) is a no-op.
+        """
 
         if self.n_classes != 1:
             raise ValueError("Exporting models with more than one class is currently not supported! "
                              "Use the `export_to_onnx` function instead.")
+
+        model_to_save = copy.deepcopy(model).to("cpu")
+
+        if temperature != 1.0:
+            class TempScaled(nn.Module):
+                def __init__(self, m, T, eps=1e-6):
+                    super().__init__()
+                    self.m = m
+                    self.T = float(T)
+                    self.eps = eps
+
+                def forward(self, x):
+                    s = self.m(x).clamp(self.eps, 1.0 - self.eps)
+                    logit = torch.log(s) - torch.log(1.0 - s)
+                    return torch.sigmoid(self.T * logit)
+            model_to_save = TempScaled(model_to_save, temperature)
+            logging.info(f"Applying inference temperature scaling T={temperature} to exported ONNX")
 
         # Save ONNX model. opset 17 is required for nn.MultiheadAttention used
         # by the conv_attention head; safe for the dnn / rnn heads as well.
@@ -515,9 +558,8 @@ class Model(nn.Module):
         # size; the runtime in openwakeword.model only reads shape[1] (the
         # fixed 16-frame time axis), so this is backwards compatible.
         logging.info(f"####\nSaving ONNX mode as '{os.path.join(output_dir, model_name + '.onnx')}'")
-        model_to_save = copy.deepcopy(model)
         torch.onnx.export(
-            model_to_save.to("cpu"),
+            model_to_save,
             torch.rand(self.input_shape)[None, ],
             os.path.join(output_dir, model_name + ".onnx"),
             opset_version=17,
@@ -658,14 +700,24 @@ class Model(nn.Module):
                 self.history["positive_test_clips_recall"].append(tp/(tp + fn))
 
             if step_ndx in val_steps and step_ndx > 1 and X_val is not None:
-                # Get metrics for balanced test examples of positive and negative clips
+                # Concatenate predictions/labels across batches before
+                # computing metrics. The original code overwrote val_recall /
+                # val_acc / val_fp each iteration; that was harmless when
+                # X_val ran in a single huge batch, but breaks now that we
+                # cap the val batch size to keep MultiheadAttention's CUDA
+                # SDPA kernel from crashing.
+                all_preds = []
+                all_labels = []
                 for val_step_ndx, data in enumerate(X_val):
                     with torch.no_grad():
                         x_val, y_val = data[0].to(self.device), data[1].to(self.device)
-                        val_predictions = self.model(x_val)
-                        val_recall = self.recall(val_predictions, y_val[..., None]).detach().cpu().numpy()
-                        val_acc = self.accuracy(val_predictions, y_val[..., None].to(torch.int64))
-                        val_fp = self.fp(val_predictions, y_val[..., None])
+                        all_preds.append(self.model(x_val))
+                        all_labels.append(y_val)
+                all_preds = torch.cat(all_preds)
+                all_labels = torch.cat(all_labels)
+                val_recall = self.recall(all_preds, all_labels[..., None]).detach().cpu().numpy()
+                val_acc = self.accuracy(all_preds, all_labels[..., None].to(torch.int64))
+                val_fp = self.fp(all_preds, all_labels[..., None])
                 self.history["val_accuracy"].append(val_acc.detach().cpu().numpy())
                 self.history["val_recall"].append(val_recall)
                 self.history["val_n_fp"].append(val_fp.detach().cpu().numpy())
@@ -778,7 +830,7 @@ if __name__ == '__main__':
             generate_samples(
                 text=config["target_phrase"], max_samples=config["n_samples"]-n_current_samples,
                 batch_size=config["tts_batch_size"],
-                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.75, 1.0, 1.25],
+                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                 output_dir=positive_train_output_dir, auto_reduce_batch_size=True,
                 file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
             )
@@ -794,7 +846,7 @@ if __name__ == '__main__':
         if n_current_samples <= 0.95*config["n_samples_val"]:
             generate_samples(text=config["target_phrase"], max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"],
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.75, 1.0, 1.25],
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=positive_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:
@@ -812,10 +864,16 @@ if __name__ == '__main__':
                     input_text=target_phrase,
                     N=config["n_samples"]//len(config["target_phrase"]),
                     include_partial_phrase=1.0,
-                    include_input_words=0.2))
+                    # Default upstream value (0.2) keeps 20% of input words
+                    # verbatim, producing adversarials like "hey <near-rhyme>"
+                    # — phonetically *too* close to the positive cluster, which
+                    # over-trains the model to reject anything resembling
+                    # "hey ari" and causes under-firing on the real phrase.
+                    # 0.0 forces both words to be replaced.
+                    include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples"]-n_current_samples,
-                             batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.75, 1.0, 1.25],
+                             batch_size=config["tts_batch_size"]//3,
+                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=negative_train_output_dir, auto_reduce_batch_size=True,
                              file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
                              )
@@ -835,10 +893,16 @@ if __name__ == '__main__':
                     input_text=target_phrase,
                     N=config["n_samples_val"]//len(config["target_phrase"]),
                     include_partial_phrase=1.0,
-                    include_input_words=0.2))
+                    # Default upstream value (0.2) keeps 20% of input words
+                    # verbatim, producing adversarials like "hey <near-rhyme>"
+                    # — phonetically *too* close to the positive cluster, which
+                    # over-trains the model to reject anything resembling
+                    # "hey ari" and causes under-firing on the real phrase.
+                    # 0.0 forces both words to be replaced.
+                    include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples_val"]-n_current_samples,
-                             batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.75, 1.0, 1.25],
+                             batch_size=config["tts_batch_size"]//3,
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
                              output_dir=negative_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:
@@ -988,12 +1052,22 @@ if __name__ == '__main__':
             num_workers=0,
         )
 
+        # Validation DataLoaders: cap batch_size at 256. Previously these
+        # used batch_size=len(labels), pushing the entire validation set
+        # (up to ~hundreds of thousands of windows for X_val_fp) through
+        # one model.forward call. The dnn head tolerated that; the
+        # conv_attention head's MultiheadAttention crashes the CUDA SDPA
+        # kernel with "invalid configuration argument" at large B (the
+        # specific kernel-launch limit varies per GPU). 256 is well under
+        # any backend limit and the val loop accumulates across batches.
+        VAL_BATCH = 256
+
         X_val_fp = np.load(config["false_positive_validation_data_path"])
         X_val_fp = np.array([X_val_fp[i:i+input_shape[0]] for i in range(0, X_val_fp.shape[0]-input_shape[0], 1)])  # reshape to match model
         X_val_fp_labels = np.zeros(X_val_fp.shape[0]).astype(np.float32)
         X_val_fp = torch.utils.data.DataLoader(
             torch.utils.data.TensorDataset(torch.from_numpy(X_val_fp), torch.from_numpy(X_val_fp_labels)),
-            batch_size=len(X_val_fp_labels)
+            batch_size=VAL_BATCH
         )
 
         X_val_pos = np.load(os.path.join(feature_save_dir, "positive_features_test.npy"))
@@ -1005,7 +1079,7 @@ if __name__ == '__main__':
                 torch.from_numpy(np.vstack((X_val_pos, X_val_neg))),
                 torch.from_numpy(labels)
                 ),
-            batch_size=len(labels)
+            batch_size=VAL_BATCH
         )
 
         # Run auto training
@@ -1018,5 +1092,12 @@ if __name__ == '__main__':
             target_fp_per_hour=config["target_false_positives_per_hour"],
         )
 
-        # Export the trained model to onnx
-        oww.export_model(model=best_model, model_name=config["model_name"], output_dir=config["output_dir"])
+        # Export the trained model to onnx. Optional inference_temperature
+        # (default 1.0 = identity) sharpens the sigmoid output post-hoc:
+        # s' = sigmoid(T * logit(s)). T~11 maps a 0.55 peak to ~0.9.
+        oww.export_model(
+            model=best_model,
+            model_name=config["model_name"],
+            output_dir=config["output_dir"],
+            temperature=float(config.get("inference_temperature", 1.0)),
+        )

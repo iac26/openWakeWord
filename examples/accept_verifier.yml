@@ -1,0 +1,41 @@
+# Training config for the "accept" VERIFIER model.
+# See hey_ari_verifier.yml for full rationale and structure.
+# Status: NOT YET RUNNABLE — scaffolding only.
+
+model_name: "accept_verifier"
+verifier_for: "accept"
+
+# ---------------------------------------------------------------------
+# Real-audio data — to be collected.
+# ---------------------------------------------------------------------
+# Positives: real recordings of "accept" said as a confirmation. These
+# clips are typically uttered after a wake-word interaction, so capture
+# in that conversational context if possible.
+positive_audio_dir: "./training_workspace/verifier_data/accept/positives"
+
+# Hard negatives: clips where the trained "accept" primary fired but
+# the user wasn't saying "accept". CRITICAL: include "decline" clips
+# the accept primary fired on (and vice versa for decline_verifier) —
+# the two confirmation models are most likely to fool each other.
+hard_negative_audio_dir: "./training_workspace/verifier_data/accept/hard_negatives"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+augmentation_rounds: 4
+
+model_type: "verifier_mlp"
+hidden_dim: 64
+
+batch_size: 32
+steps: 5000
+lr: 0.0005
+
+loss_type: "bce"
+
+primary_onnx: "./training_workspace/output/accept.onnx"
+primary_threshold: 0.5
+fused_output_path: "./training_workspace/output/accept_fused.onnx"
+
+inference_temperature: 1.0
