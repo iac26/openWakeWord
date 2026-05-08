@@ -11,21 +11,27 @@ model_name: "hey_ari"
 target_phrase:
   - "hey ari"
 
-# Hand-curated phrases the model should reject. Keep this list short and
-# only include phrases whose TTS audio is *clearly different* from the
-# wake word — items like "hey aria" or "hey area" differ from "hey ari"
-# by 50-100 ms of trailing audio in synthesis, and training on them
-# makes the model over-picky on the final phoneme of the real phrase
-# (causing under-firing on real users).
+# Custom negative phrases should be CLEARLY DIFFERENT from the wake word
+# — common phrases the system might encounter, NOT phonetic neighbours.
 #
-# generate_adversarial_texts already produces phonetic neighbours
-# automatically (with include_input_words=0.0 so they don't share words
-# with the target). That covers the "near-rhyme" space.
+# Source: openWakeWord upstream evaluations (Neural Engineer / dscripka).
+# Verbatim guidance: "training on phonetically similar phrases like
+# 'hey call' or 'hey carl' actually hurts performance, and only clearly
+# different phrases like 'hello', 'hey siri', 'alexa' should be used".
+# Phonetic near-rhymes are already produced automatically by
+# generate_adversarial_texts; that's where 'hey jealous' came from in
+# the official hey_jarvis training set, NOT from a curated list.
 #
-# Use this list only for: (a) common names/words you've observed
-# triggering FPs in deployment, and (b) the *other* command word(s) in
-# the system so models don't fire on each other.
-custom_negative_phrases: []
+# Add real false-positive triggers observed in deployment after the
+# initial model is in use.
+custom_negative_phrases:
+  - "hello"
+  - "hey siri"
+  - "alexa"
+  - "ok google"
+  - "hey google"
+  - "computer"
+  - "hey jarvis"
 
 # Synthetic positives. 200k = ~100k per phrase variant, matching the
 # upstream alexa/hey_mycroft per-phrase training scale. Going below ~30k

@@ -8,24 +8,24 @@ model_name: "decline"
 target_phrase:
   - "decline"
 
-# Single-word commands fire on phonetic neighbours easily — populate this
-# generously. "accept" is included so this model and the accept model
-# don't fire on each other's clips. Add anything you see triggering false
-# positives in practice.
+# Custom negative phrases should be CLEARLY DIFFERENT — common words /
+# phrases the system might encounter, plus the OTHER command word so
+# the two confirmation models don't fire on each other.
+#
+# Phonetic neighbours of "decline" (incline, recline, deny...) are
+# produced automatically by generate_adversarial_texts. Putting them
+# here as well over-trains rejection of near-misses and causes the
+# model to under-fire on the real word. Source: openWakeWord upstream
+# guidance — only "clearly different" phrases here.
 custom_negative_phrases:
   - "accept"
-  - "design"
-  - "incline"
-  - "recline"
-  - "define"
-  - "deny"
-  - "decode"
-  - "the line"
-  - "decline it"
-  - "online"
-  - "in line"
-  - "deadline"
-  - "discline"
+  - "hello"
+  - "yes"
+  - "no"
+  - "okay"
+  - "cancel"
+  - "stop"
+  - "go back"
 
 # Synthetic positives. 100k matches the upstream alexa/hey_mycroft training
 # scale for a single-phrase model. Lower this only if you're tight on GPU
