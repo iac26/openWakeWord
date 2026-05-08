@@ -434,11 +434,18 @@ class Model(nn.Module):
         else:
             combined_model = self.model
 
-        # Report validation metrics for combined model
+        # Report validation metrics for combined model. Accumulate preds+labels
+        # across all val batches; computing the metric from only the last batch
+        # (the previous behaviour) gave nonsense recall/accuracy on small final
+        # batches.
         with torch.no_grad():
+            all_preds, all_labels = [], []
             for batch in X_val:
                 x, y = batch[0].to(self.device), batch[1].to(self.device)
-                val_ps = combined_model(x)
+                all_preds.append(combined_model(x))
+                all_labels.append(y)
+            val_ps = torch.cat(all_preds)
+            y = torch.cat(all_labels)
 
             combined_model_recall = self.recall(val_ps, y[..., None]).detach().cpu().numpy()
             combined_model_accuracy = self.accuracy(val_ps, y[..., None].to(torch.int64)).detach().cpu().numpy()
