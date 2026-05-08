@@ -778,7 +778,7 @@ if __name__ == '__main__':
             generate_samples(
                 text=config["target_phrase"], max_samples=config["n_samples"]-n_current_samples,
                 batch_size=config["tts_batch_size"],
-                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.75, 1.0, 1.25],
+                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
                 output_dir=positive_train_output_dir, auto_reduce_batch_size=True,
                 file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
             )
@@ -794,7 +794,7 @@ if __name__ == '__main__':
         if n_current_samples <= 0.95*config["n_samples_val"]:
             generate_samples(text=config["target_phrase"], max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"],
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.75, 1.0, 1.25],
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
                              output_dir=positive_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:
@@ -812,10 +812,16 @@ if __name__ == '__main__':
                     input_text=target_phrase,
                     N=config["n_samples"]//len(config["target_phrase"]),
                     include_partial_phrase=1.0,
-                    include_input_words=0.2))
+                    # Default upstream value (0.2) keeps 20% of input words
+                    # verbatim, producing adversarials like "hey <near-rhyme>"
+                    # — phonetically *too* close to the positive cluster, which
+                    # over-trains the model to reject anything resembling
+                    # "hey ari" and causes under-firing on the real phrase.
+                    # 0.0 forces both words to be replaced.
+                    include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.75, 1.0, 1.25],
+                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
                              output_dir=negative_train_output_dir, auto_reduce_batch_size=True,
                              file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
                              )
@@ -835,10 +841,16 @@ if __name__ == '__main__':
                     input_text=target_phrase,
                     N=config["n_samples_val"]//len(config["target_phrase"]),
                     include_partial_phrase=1.0,
-                    include_input_words=0.2))
+                    # Default upstream value (0.2) keeps 20% of input words
+                    # verbatim, producing adversarials like "hey <near-rhyme>"
+                    # — phonetically *too* close to the positive cluster, which
+                    # over-trains the model to reject anything resembling
+                    # "hey ari" and causes under-firing on the real phrase.
+                    # 0.0 forces both words to be replaced.
+                    include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//7,
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.75, 1.0, 1.25],
+                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.3, 1.5],
                              output_dir=negative_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:

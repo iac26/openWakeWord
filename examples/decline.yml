@@ -86,5 +86,7 @@ mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
-max_negative_weight: 1500
-target_false_positives_per_hour: 0.2
+
+# Loosened negative pressure: see hey_ari.yml.
+max_negative_weight: 750
+target_false_positives_per_hour: 0.5

@@ -99,5 +99,13 @@ mixup_alpha: 0.2
 
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
-max_negative_weight: 1500
-target_false_positives_per_hour: 0.2
+
+# auto_train ramps negative weight from 1 to max_negative_weight over
+# sequence 1, then doubles it each subsequent sequence if FP rate is still
+# above target. With the default 1500 + adversarial-negatives that include
+# input words (now disabled), the gradient was so heavily skewed against
+# negatives that the model under-fired on the real phrase. 750 + relaxed
+# FP target loosens that pressure; the focal loss + better adversarial
+# generation handle the tail.
+max_negative_weight: 750
+target_false_positives_per_hour: 0.5

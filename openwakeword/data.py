@@ -600,6 +600,14 @@ class _PerClipAugDataset(torch.utils.data.Dataset):
                 audiomentations.TanhDistortion(
                     min_distortion=0.0001, max_distortion=0.10,
                     p=self.aug_probs["TanhDistortion"]),
+                # Continuous speed variation on top of Piper's discrete
+                # length_scales buckets. Real users speak at arbitrary
+                # speeds; without this the model overfits to the synthetic
+                # phoneme-duration grid and only fires at "the right speed".
+                audiomentations.TimeStretch(
+                    min_rate=0.85, max_rate=1.2,
+                    p=self.aug_probs.get("TimeStretch", 0.4),
+                    leave_length_unchanged=True),
             ])
 
     def __getitem__(self, idx):
