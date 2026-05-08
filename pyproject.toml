@@ -105,6 +105,21 @@ Homepage = "https://github.com/dscripka/openWakeWord"
 [tool.setuptools.packages.find]
 include = ["openwakeword*"]
 
+# `training` and `full-legacy` pin incompatible torch versions (2.x vs 1.x).
+# Declare them as mutually exclusive so `uv sync` resolves each in its own
+# split instead of trying to satisfy both at once.
+[tool.uv]
+conflicts = [
+    [
+        { extra = "training" },
+        { extra = "full-legacy" },
+    ],
+    [
+        { extra = "tflite-export" },
+        { extra = "full-legacy" },
+    ],
+]
+
 [tool.pytest.ini_options]
 addopts = "--cov=openwakeword --cov-report term-missing --flake8 --mypy --mypy-ignore-missing-imports"
 flake8-max-line-length = "140"
