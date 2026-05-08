@@ -325,12 +325,15 @@ class Model(nn.Module):
         Returns:
             list: A list of the top n models
         """
-        # Get false positive rates for each model
+        # Get false positive rates for each model. Single tqdm over batches:
+        # the previous structure put tqdm on the inner model loop, which
+        # restarted the bar for every batch and looked like an infinite
+        # loop on large false_positive_validate_data sets.
         false_positive_rates = [0]*len(self.best_models)
-        for batch in false_positive_validate_data:
+        for batch in tqdm(false_positive_validate_data,
+                          desc="Find best checkpoints by false positive rate"):
             x_val, y_val = batch[0].to(self.device), batch[1].to(self.device)
-            for mdl_ndx, model in tqdm(enumerate(self.best_models), total=len(self.best_models),
-                                       desc="Find best checkpoints by false positive rate"):
+            for mdl_ndx, model in enumerate(self.best_models):
                 with torch.no_grad():
                     val_ps = model(x_val)
                     false_positive_rates[mdl_ndx] = false_positive_rates[mdl_ndx] + self.fp(val_ps, y_val[..., None]).detach().cpu().numpy()
