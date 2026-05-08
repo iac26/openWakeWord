@@ -339,21 +339,44 @@ class Model(nn.Module):
                     false_positive_rates[mdl_ndx] = false_positive_rates[mdl_ndx] + self.fp(val_ps, y_val[..., None]).detach().cpu().numpy()
         false_positive_rates = [fp/val_set_hrs for fp in false_positive_rates]
 
+        all_recalls = [s["val_recall"] for s in self.best_model_scores]
         candidate_model_ndx = [ndx for ndx, fp in enumerate(false_positive_rates) if fp <= max_fp_per_hour]
-        candidate_model_recall = [self.best_model_scores[ndx]["val_recall"] for ndx in candidate_model_ndx]
-        if not candidate_model_recall:
-            logging.warning(f"No checkpoints had FP/hr <= {max_fp_per_hour}!")
-            return None
-        if max(candidate_model_recall) <= min_recall:
-            logging.warning(f"No models with recall >= {min_recall} found!")
-            return None
-        else:
-            best_model = self.best_models[candidate_model_ndx[np.argmax(candidate_model_recall)]]
-            best_model_training_step = self.best_model_scores[candidate_model_ndx[np.argmax(candidate_model_recall)]]["training_step_ndx"]
-            logging.info(f"Best model from training step {best_model_training_step} out of {len(candidate_model_ndx)}"
-                         f"models has recall of {np.max(candidate_model_recall)} and false positive rate of"
-                         f" {false_positive_rates[candidate_model_ndx[np.argmax(candidate_model_recall)]]}")
+        candidate_model_recall = [all_recalls[ndx] for ndx in candidate_model_ndx]
 
+        # If nothing meets the strict FP target, fall back to the
+        # highest-recall checkpoint regardless of FP. This is far better
+        # than returning None and letting auto_train use self.model (the
+        # final-step model from seq 3), which has been trained into the
+        # ground on the escalated negative weight and effectively never
+        # fires on real positives.
+        if not candidate_model_recall or max(candidate_model_recall) <= min_recall:
+            if not candidate_model_recall:
+                logging.warning(
+                    f"No checkpoints met FP/hr <= {max_fp_per_hour}. Relaxing "
+                    f"the constraint and picking highest-recall checkpoint "
+                    f"from the full pool ({len(self.best_models)} candidates)."
+                )
+            else:
+                logging.warning(
+                    f"No FP-qualifying checkpoint cleared min_recall={min_recall}. "
+                    f"Relaxing and picking highest-recall checkpoint from the "
+                    f"full pool."
+                )
+            if not all_recalls:
+                logging.error("No checkpoints recorded during training; cannot select a best model.")
+                return None
+            best_ndx = int(np.argmax(all_recalls))
+        else:
+            best_ndx = candidate_model_ndx[int(np.argmax(candidate_model_recall))]
+
+        best_model = self.best_models[best_ndx]
+        best_score = self.best_model_scores[best_ndx]
+        logging.info(
+            f"Best model from training step {best_score['training_step_ndx']} "
+            f"of {len(self.best_models)} candidates: "
+            f"recall={all_recalls[best_ndx]:.4f}, "
+            f"FP/hr={false_positive_rates[best_ndx]:.4f}"
+        )
         return best_model
 
     def auto_train(self, X_train, X_val, false_positive_val_data, steps=50000, max_negative_weight=1000,
