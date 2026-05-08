@@ -83,6 +83,8 @@ loss_type: "focal"
 focal_gamma: 2.0
 embedding_mixup: true
 mixup_alpha: 0.2
+label_smoothing: 0.05
+weight_decay: 0.01
 
 # Post-hoc temperature on the exported ONNX. See hey_ari.yml.
 inference_temperature: 11.0

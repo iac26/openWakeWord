@@ -101,6 +101,15 @@ focal_gamma: 2.0
 embedding_mixup: true
 mixup_alpha: 0.2
 
+# Label smoothing: replace hard 0/1 targets with eps/2 and 1-eps/2 at
+# training time. Modest regularizer; livekit-wakeword uses it. 0.05 is
+# conservative — set to 0.0 to disable. Stacks fine with focal + mixup.
+label_smoothing: 0.05
+
+# AdamW weight decay. 0.01 is the standard AdamW default; livekit uses
+# this too. Set to 0.0 for legacy plain-Adam behaviour.
+weight_decay: 0.01
+
 # Post-hoc temperature scaling baked into the exported ONNX:
 #   s' = sigmoid(T * logit(s))
 # Focal loss + mixup leave real-audio scores capped around ~0.55. T=11

@@ -26,6 +26,7 @@ class Model(nn.Module):
                  layer_dim=128, n_blocks=1, seconds_per_example=None,
                  loss_type="bce", focal_gamma=2.0,
                  embedding_mixup=False, mixup_alpha=0.2,
+                 label_smoothing=0.0, weight_decay=0.01,
                  n_heads=4, n_conv=2, n_attn=1):
         super().__init__()
 
@@ -49,6 +50,11 @@ class Model(nn.Module):
         # Embedding mixup config
         self.embedding_mixup = embedding_mixup
         self.mixup_alpha = mixup_alpha
+
+        # Label smoothing config: target labels become y*(1-eps) + 0.5*eps,
+        # i.e. 1.0 -> 1-eps/2 and 0.0 -> eps/2. Reduces over-confidence.
+        # Disabled by default (0.0). Stacks with focal loss.
+        self.label_smoothing = label_smoothing
 
         # Define model (currently on fully-connected network supported)
         if model_type == "dnn":
@@ -209,7 +215,13 @@ class Model(nn.Module):
             self.loss = torch.nn.functional.binary_cross_entropy
         else:
             self.loss = nn.functional.cross_entropy
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.0001)
+        # AdamW (decoupled weight decay) matches livekit-wakeword's recipe and
+        # generalizes slightly better than plain Adam in our regime. Default
+        # weight_decay=0.01 is the standard AdamW value; pass weight_decay=0.0
+        # if you need exact-Adam behaviour.
+        self.optimizer = optim.AdamW(
+            self.model.parameters(), lr=0.0001, weight_decay=weight_decay
+        )
 
     def save_model(self, output_path):
         """
@@ -379,6 +391,65 @@ class Model(nn.Module):
         )
         return best_model
 
+    def _find_optimal_threshold(self, model, X_val, false_positive_val_data,
+                                val_set_hrs, target_fpph, min_recall=0.5):
+        """Post-hoc threshold sweep on validation data.
+
+        Mirrors livekit-wakeword/training/metrics.py:find_best_threshold:
+        scans thresholds in [0.01, 0.99] and picks the one that maximizes
+        recall on positives while keeping FPPH on the long negative set
+        below target_fpph. Falls back to the threshold with the best
+        balanced accuracy if no threshold satisfies both constraints.
+
+        Returns: (best_threshold, recall, fpph)
+        """
+        model.eval()
+        with torch.no_grad():
+            # Positive vs negative predictions from X_val (labels split).
+            pos_preds_parts, neg_preds_parts = [], []
+            for batch in X_val:
+                x, y = batch[0].to(self.device), batch[1].to(self.device)
+                p = model(x).squeeze(-1).detach().cpu().numpy()
+                y_np = y.detach().cpu().numpy().astype(bool)
+                pos_preds_parts.append(p[y_np])
+                neg_preds_parts.append(p[~y_np])
+            pos_preds = np.concatenate(pos_preds_parts) if pos_preds_parts else np.array([])
+
+            # Long negative-only set drives the FPPH calc since it has the
+            # known duration (val_set_hrs).
+            fp_preds_parts = []
+            for batch in false_positive_val_data:
+                x = batch[0].to(self.device)
+                fp_preds_parts.append(model(x).squeeze(-1).detach().cpu().numpy())
+            fp_preds = np.concatenate(fp_preds_parts) if fp_preds_parts else np.array([])
+
+        thresholds = np.arange(0.01, 1.0, 0.01)
+        best, best_fallback = None, None
+        for t in thresholds:
+            t_float = float(t)
+            recall = float(np.mean(pos_preds >= t_float)) if pos_preds.size else 0.0
+            if recall < min_recall:
+                continue
+            fpph = float(np.sum(fp_preds >= t_float) / val_set_hrs) if val_set_hrs > 0 else float("inf")
+            tnr = float(np.mean(fp_preds < t_float)) if fp_preds.size else 0.0
+            balanced_acc = (recall + tnr) / 2.0
+            entry = (t_float, recall, fpph, balanced_acc)
+
+            if fpph <= target_fpph:
+                if best is None or recall > best[1]:
+                    best = entry
+            if best_fallback is None or balanced_acc > best_fallback[3]:
+                best_fallback = entry
+
+        chosen = best if best is not None else best_fallback
+        if chosen is None:
+            logging.warning(
+                f"No threshold met min_recall={min_recall}; defaulting to 0.5"
+            )
+            return 0.5, 0.0, float("inf")
+        t, recall, fpph, _ = chosen
+        return t, recall, fpph
+
     def auto_train(self, X_train, X_val, false_positive_val_data, steps=50000, max_negative_weight=1000,
                    target_fp_per_hour=0.2):
         """A sequence of training steps that produce relatively strong models
@@ -389,7 +460,11 @@ class Model(nn.Module):
         # Get false positive validation data duration
         val_set_hrs = 11.3
 
-        # Sequence 1
+        # Sequence 1: bulk training. Job is to converge the model into the
+        # right basin; checkpoints from this phase are NOT collected for the
+        # final-model pool because LR=1e-4 produces noisy weights that don't
+        # average meaningfully with the cooler phases. Validation still runs
+        # so escalation logic and metrics history work normally.
         logging.info("#"*50 + "\nStarting training sequence 1...\n" + "#"*50)
         lr = 0.0001
         weights = np.linspace(1, max_negative_weight, int(steps)).tolist()
@@ -401,7 +476,8 @@ class Model(nn.Module):
                     max_steps=steps,
                     negative_weight_schedule=weights,
                     val_steps=val_steps, warmup_steps=steps//5,
-                    hold_steps=steps//3, lr=lr, val_set_hrs=val_set_hrs)
+                    hold_steps=steps//3, lr=lr, val_set_hrs=val_set_hrs,
+                    save_checkpoints_to_pool=False)
 
         # Sequence 2
         logging.info("#"*50 + "\nStarting training sequence 2...\n" + "#"*50)
@@ -490,6 +566,26 @@ class Model(nn.Module):
         logging.info(f"\n################\nFinal Model Accuracy: {combined_model_accuracy}"
                      f"\nFinal Model Recall: {combined_model_recall}\nFinal Model False Positives per Hour: {combined_model_fp_per_hr}"
                      "\n################\n")
+
+        # Post-hoc threshold optimization. Sweeps thresholds on the val set
+        # and picks the one that maximizes recall while keeping FPPH below
+        # target_fp_per_hour. The exported model itself is unchanged; this
+        # tells you the *recommended* deployment threshold instead of the
+        # default 0.5. Mirrors livekit-wakeword's _find_optimal_threshold.
+        opt_t, opt_recall, opt_fpph = self._find_optimal_threshold(
+            model=combined_model,
+            X_val=X_val,
+            false_positive_val_data=false_positive_val_data,
+            val_set_hrs=val_set_hrs,
+            target_fpph=target_fp_per_hour,
+        )
+        logging.info(
+            f"\n################\nOptimal deployment threshold: {opt_t:.2f}"
+            f"\n  recall at this threshold: {opt_recall:.4f}"
+            f"\n  FP/hr at this threshold:  {opt_fpph:.4f}"
+            f"\n  (target was {target_fp_per_hour})"
+            "\n################\n"
+        )
 
         return combined_model
 
@@ -596,7 +692,8 @@ class Model(nn.Module):
     def train_model(self, X, max_steps, warmup_steps, hold_steps, X_val=None,
                     false_positive_val_data=None, positive_test_clips=None,
                     negative_weight_schedule=[1],
-                    val_steps=[250], lr=0.0001, val_set_hrs=1):
+                    val_steps=[250], lr=0.0001, val_set_hrs=1,
+                    save_checkpoints_to_pool=True):
         # Move models and main class to target device
         self.to(self.device)
         self.model.to(self.device)
@@ -622,6 +719,14 @@ class Model(nn.Module):
                 x = lam * x + (1.0 - lam) * x[perm]
                 y_ = lam * y_ + (1.0 - lam) * y_[perm]
                 y = (y_.squeeze(-1) >= 0.5).long()
+
+            # Label smoothing: 1.0 -> 1 - eps/2, 0.0 -> eps/2. Reduces
+            # over-confidence at training time. Applied after mixup so it
+            # caps the extremes of whatever soft target mixup produces.
+            # n_classes == 1 only.
+            if self.label_smoothing > 0.0 and self.n_classes == 1:
+                eps = self.label_smoothing
+                y_ = y_ * (1.0 - eps) + 0.5 * eps
 
             # Update learning rates
             for g in self.optimizer.param_groups:
@@ -746,8 +851,13 @@ class Model(nn.Module):
                 self.history["val_n_fp"].append(val_fp.detach().cpu().numpy())
 
             # Save models with a validation score above/below the 90th percentile
-            # of the validation scores up to that point
-            if step_ndx in val_steps and step_ndx > 1:
+            # of the validation scores up to that point. Phase-1 (long, high-LR)
+            # checkpoints are excluded from the pool by passing
+            # save_checkpoints_to_pool=False from auto_train: phase 1's job is
+            # to find the basin, not to produce deployable checkpoints.
+            # Per Izmailov et al. 2018 (SWA), averaging is meaningful only
+            # within the same LR regime late in training.
+            if save_checkpoints_to_pool and step_ndx in val_steps and step_ndx > 1:
                 if self.history["val_n_fp"][-1] <= np.percentile(self.history["val_n_fp"], 50) and \
                    self.history["val_recall"][-1] >= np.percentile(self.history["val_recall"], 5):
                     # logging.info("Saving checkpoint with metrics >= to targets!")
@@ -1029,6 +1139,8 @@ if __name__ == '__main__':
             focal_gamma=config.get("focal_gamma", 2.0),
             embedding_mixup=config.get("embedding_mixup", False),
             mixup_alpha=config.get("mixup_alpha", 0.2),
+            label_smoothing=config.get("label_smoothing", 0.0),
+            weight_decay=config.get("weight_decay", 0.01),
             n_heads=config.get("n_heads", 4),
             n_conv=config.get("n_conv", 2),
             n_attn=config.get("n_attn", 1),
