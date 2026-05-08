@@ -811,6 +811,13 @@ class Model(nn.Module):
                     fp = self.fp(accumulated_predictions, accumulated_labels if self.n_classes == 1 else y)
                     self.n_fp += fp
                     metric_labels = (accumulated_labels >= 0.5).long() if self.n_classes == 1 else accumulated_labels
+                    # torchmetrics.Recall is stateful: reset before each call
+                    # so each batch's recall is independent. Without this,
+                    # every reported recall is the cumulative running average
+                    # across all calls — which silently poisoned every
+                    # checkpoint's val_recall in best_model_scores and led
+                    # _select_best_model to pick badly.
+                    self.recall.reset()
                     self.history["recall"].append(self.recall(accumulated_predictions, metric_labels).detach().cpu().numpy())
 
                     accumulated_predictions = torch.Tensor([]).to(self.device)
@@ -862,6 +869,14 @@ class Model(nn.Module):
                         all_labels.append(y_val)
                 all_preds = torch.cat(all_preds)
                 all_labels = torch.cat(all_labels)
+                # Reset stateful metrics so val_recall/val_acc reflect THIS
+                # val_step's predictions only, not the cumulative average
+                # across every previous train-batch + val call. Without this,
+                # best_model_scores recorded misleadingly small recalls,
+                # causing _select_best_model to pick poorly-performing
+                # checkpoints.
+                self.recall.reset()
+                self.accuracy.reset()
                 val_recall = self.recall(all_preds, all_labels[..., None]).detach().cpu().numpy()
                 val_acc = self.accuracy(all_preds, all_labels[..., None].to(torch.int64))
                 val_fp = self.fp(all_preds, all_labels[..., None])
