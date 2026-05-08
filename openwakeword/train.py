@@ -23,7 +23,10 @@ from openwakeword.utils import AudioFeatures
 # Base model class for an openwakeword model
 class Model(nn.Module):
     def __init__(self, n_classes=1, input_shape=(16, 96), model_type="dnn",
-                 layer_dim=128, n_blocks=1, seconds_per_example=None):
+                 layer_dim=128, n_blocks=1, seconds_per_example=None,
+                 loss_type="bce", focal_gamma=2.0,
+                 embedding_mixup=False, mixup_alpha=0.2,
+                 n_heads=4, n_conv=2, n_attn=1):
         super().__init__()
 
         # Store inputs as attributes
@@ -37,6 +40,15 @@ class Model(nn.Module):
         self.best_val_accuracy = 0
         self.best_val_recall = 0
         self.best_train_recall = 0
+        self.model_type = model_type
+
+        # Loss config
+        self.loss_type = loss_type
+        self.focal_gamma = focal_gamma
+
+        # Embedding mixup config
+        self.embedding_mixup = embedding_mixup
+        self.mixup_alpha = mixup_alpha
 
         # Define model (currently on fully-connected network supported)
         if model_type == "dnn":
@@ -93,6 +105,54 @@ class Model(nn.Module):
                     out, h = self.layer1(x)
                     return self.layer3(self.layer2(out[:, -1]))
             self.model = Net(input_shape, n_classes)
+        elif model_type == "conv_attention":
+            # Conv1D blocks for local syllable transitions, multi-head
+            # self-attention for long-range temporal structure, mean-pool over
+            # time. Replaces the dnn head's Flatten(16x96)->Linear which
+            # destroys the temporal structure of the embedding sequence.
+            # Reference: livekit-wakeword (Apache-2.0).
+            class ConvAttentionNet(nn.Module):
+                def __init__(self, input_shape, hidden_dim=128, n_heads=4,
+                             n_conv=2, n_attn=1, n_classes=1):
+                    super().__init__()
+                    if hidden_dim % n_heads != 0:
+                        raise ValueError(
+                            f"hidden_dim ({hidden_dim}) must be divisible by "
+                            f"n_heads ({n_heads}) for MultiheadAttention"
+                        )
+                    self.input_proj = nn.Linear(input_shape[1], hidden_dim)
+                    conv_layers = []
+                    for _ in range(n_conv):
+                        conv_layers += [
+                            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                            nn.GELU(),
+                            nn.BatchNorm1d(hidden_dim),
+                        ]
+                    self.conv = nn.Sequential(*conv_layers)
+                    self.attn_layers = nn.ModuleList([
+                        nn.MultiheadAttention(hidden_dim, n_heads, batch_first=True)
+                        for _ in range(n_attn)
+                    ])
+                    self.attn_norms = nn.ModuleList([
+                        nn.LayerNorm(hidden_dim) for _ in range(n_attn)
+                    ])
+                    self.head = nn.Linear(hidden_dim, n_classes)
+                    self.last_act = nn.Sigmoid() if n_classes == 1 else nn.ReLU()
+
+                def forward(self, x):
+                    # x: (B, T, D) where T=16, D=96
+                    h = self.input_proj(x)         # (B, T, H)
+                    h = h.transpose(1, 2)          # (B, H, T) for Conv1d
+                    h = self.conv(h)               # (B, H, T)
+                    h = h.transpose(1, 2)          # (B, T, H)
+                    for attn, norm in zip(self.attn_layers, self.attn_norms):
+                        attn_out, _ = attn(h, h, h, need_weights=False)
+                        h = norm(h + attn_out)
+                    h = h.mean(dim=1)              # (B, H)
+                    return self.last_act(self.head(h))
+            self.model = ConvAttentionNet(input_shape, hidden_dim=layer_dim,
+                                          n_heads=n_heads, n_conv=n_conv,
+                                          n_attn=n_attn, n_classes=n_classes)
 
         # Define metrics
         if n_classes == 1:
@@ -130,7 +190,25 @@ class Model(nn.Module):
         self.history = collections.defaultdict(list)
 
         # Define optimizer and loss
-        self.loss = torch.nn.functional.binary_cross_entropy if n_classes == 1 else nn.functional.cross_entropy
+        if n_classes == 1 and loss_type == "focal":
+            # Binary focal loss with the same (input, target, weight) signature
+            # as binary_cross_entropy. Down-weights well-classified examples by
+            # (1-p_t)**gamma; gamma=2 is the value from the original paper.
+            gamma = self.focal_gamma
+
+            def _focal(input, target, weight=None, eps=1e-7):
+                p = input.clamp(min=eps, max=1.0 - eps)
+                bce = -(target * torch.log(p) + (1.0 - target) * torch.log(1.0 - p))
+                p_t = target * p + (1.0 - target) * (1.0 - p)
+                loss = (1.0 - p_t).pow(gamma) * bce
+                if weight is not None:
+                    loss = loss * weight
+                return loss.mean()
+            self.loss = _focal
+        elif n_classes == 1:
+            self.loss = torch.nn.functional.binary_cross_entropy
+        else:
+            self.loss = nn.functional.cross_entropy
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.0001)
 
     def save_model(self, output_path):
@@ -142,11 +220,19 @@ class Model(nn.Module):
 
     def export_to_onnx(self, output_path, class_mapping=""):
         obj = self
+        # opset 17 is required for nn.MultiheadAttention used by the
+        # conv_attention head; safe for the dnn / rnn heads as well.
+        opset = 17
+        # Dynamic batch axis lets downstream code run inference at any batch
+        # size; the runtime in openwakeword.model only reads shape[1] (the
+        # fixed 16-frame time axis), so this is backwards compatible.
+        dyn = {"input": {0: "batch"}, class_mapping: {0: "batch"}}
         # Make simple model for export based on model structure
         if self.n_classes == 1:
             # Save ONNX model
             torch.onnx.export(self.model.to("cpu"), torch.rand(self.input_shape)[None, ], output_path,
-                              output_names=[class_mapping])
+                              input_names=["input"], output_names=[class_mapping],
+                              dynamic_axes=dyn, opset_version=opset)
 
         elif self.n_classes >= 1:
             class M(nn.Module):
@@ -161,7 +247,8 @@ class Model(nn.Module):
 
             # Save ONNX model
             torch.onnx.export(M(), torch.rand(self.input_shape)[None, ], output_path,
-                              output_names=[class_mapping])
+                              input_names=["input"], output_names=[class_mapping],
+                              dynamic_axes=dyn, opset_version=opset)
 
     def lr_warmup_cosine_decay(self,
                                global_step,
@@ -422,11 +509,22 @@ class Model(nn.Module):
             raise ValueError("Exporting models with more than one class is currently not supported! "
                              "Use the `export_to_onnx` function instead.")
 
-        # Save ONNX model
+        # Save ONNX model. opset 17 is required for nn.MultiheadAttention used
+        # by the conv_attention head; safe for the dnn / rnn heads as well.
+        # Dynamic batch axis lets downstream code run inference at any batch
+        # size; the runtime in openwakeword.model only reads shape[1] (the
+        # fixed 16-frame time axis), so this is backwards compatible.
         logging.info(f"####\nSaving ONNX mode as '{os.path.join(output_dir, model_name + '.onnx')}'")
         model_to_save = copy.deepcopy(model)
-        torch.onnx.export(model_to_save.to("cpu"), torch.rand(self.input_shape)[None, ],
-                          os.path.join(output_dir, model_name + ".onnx"), opset_version=13)
+        torch.onnx.export(
+            model_to_save.to("cpu"),
+            torch.rand(self.input_shape)[None, ],
+            os.path.join(output_dir, model_name + ".onnx"),
+            opset_version=17,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+        )
 
         return None
 
@@ -448,6 +546,18 @@ class Model(nn.Module):
             x, y = data[0].to(self.device), data[1].to(self.device)
             y_ = y[..., None].to(torch.float32)
 
+            # Embedding mixup: linearly interpolate (x, y_) with a permutation
+            # of itself. Operates on pre-computed (T, D) embedding sequences,
+            # not waveforms. Soft labels are kept for the loss; we re-derive
+            # hard `y` from a 0.5 threshold so the high-loss filter below
+            # still works. n_classes==1 only.
+            if self.embedding_mixup and self.n_classes == 1:
+                lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
+                perm = torch.randperm(x.size(0), device=x.device)
+                x = lam * x + (1.0 - lam) * x[perm]
+                y_ = lam * y_ + (1.0 - lam) * y_[perm]
+                y = (y_.squeeze(-1) >= 0.5).long()
+
             # Update learning rates
             for g in self.optimizer.param_groups:
                 g['lr'] = self.lr_warmup_cosine_decay(step_ndx, warmup_steps=warmup_steps, hold=hold_steps,
@@ -459,12 +569,16 @@ class Model(nn.Module):
             # Get predictions for batch
             predictions = self.model(x)
 
-            # Construct batch with only samples that have high loss
-            neg_high_loss = predictions[(y == 0) & (predictions.squeeze() >= 0.001)]  # thresholds were chosen arbitrarily but work well
-            pos_high_loss = predictions[(y == 1) & (predictions.squeeze() < 0.999)]
-            y = torch.cat((y[(y == 0) & (predictions.squeeze() >= 0.001)], y[(y == 1) & (predictions.squeeze() < 0.999)]))
-            y_ = y[..., None].to(torch.float32)
-            predictions = torch.cat((neg_high_loss, pos_high_loss))
+            # Construct batch with only samples that have high loss. Track
+            # `y_` through the same mask rather than re-deriving it from hard
+            # `y`, so soft labels from embedding mixup are preserved into the
+            # loss. Without mixup, y_ == y[..., None].float() and behaviour
+            # is identical to the upstream implementation.
+            neg_mask = (y == 0) & (predictions.squeeze() >= 0.001)  # thresholds were chosen arbitrarily but work well
+            pos_mask = (y == 1) & (predictions.squeeze() < 0.999)
+            predictions = torch.cat((predictions[neg_mask], predictions[pos_mask]))
+            y_ = torch.cat((y_[neg_mask], y_[pos_mask]))
+            y = torch.cat((y[neg_mask], y[pos_mask]))
 
             # Set weights for batch
             if len(negative_weight_schedule) == 1:
@@ -500,10 +614,15 @@ class Model(nn.Module):
 
                     self.history["loss"].append(loss.detach().cpu().numpy())
 
-                    # Compute training metrics and log them
+                    # Compute training metrics and log them. With embedding
+                    # mixup the labels can be soft (in [0, 1]); torchmetrics
+                    # binary classifiers reject anything other than {0, 1},
+                    # so threshold for the metric only — the loss above
+                    # already used the soft labels.
                     fp = self.fp(accumulated_predictions, accumulated_labels if self.n_classes == 1 else y)
                     self.n_fp += fp
-                    self.history["recall"].append(self.recall(accumulated_predictions, accumulated_labels).detach().cpu().numpy())
+                    metric_labels = (accumulated_labels >= 0.5).long() if self.n_classes == 1 else accumulated_labels
+                    self.history["recall"].append(self.recall(accumulated_predictions, metric_labels).detach().cpu().numpy())
 
                     accumulated_predictions = torch.Tensor([]).to(self.device)
                     accumulated_labels = torch.Tensor([]).to(self.device)
@@ -805,8 +924,19 @@ if __name__ == '__main__':
         F = openwakeword.utils.AudioFeatures(device='cpu')
         input_shape = np.load(os.path.join(feature_save_dir, "positive_features_test.npy")).shape[1:]
 
-        oww = Model(n_classes=1, input_shape=input_shape, model_type=config["model_type"],
-                    layer_dim=config["layer_size"], seconds_per_example=1280*input_shape[0]/16000)
+        oww = Model(
+            n_classes=1, input_shape=input_shape,
+            model_type=config["model_type"],
+            layer_dim=config["layer_size"],
+            seconds_per_example=1280*input_shape[0]/16000,
+            loss_type=config.get("loss_type", "bce"),
+            focal_gamma=config.get("focal_gamma", 2.0),
+            embedding_mixup=config.get("embedding_mixup", False),
+            mixup_alpha=config.get("mixup_alpha", 0.2),
+            n_heads=config.get("n_heads", 4),
+            n_conv=config.get("n_conv", 2),
+            n_attn=config.get("n_attn", 1),
+        )
 
         # Reshape ACAV-style flat-feature mmap rows (B, F) into stacked windows
         # of length n. The original implementation looped in Python over each
