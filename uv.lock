@@ -813,6 +813,12 @@ wheels = [
 ]
 
 [[package]]
+name = "espeak-phonemizer"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/73/2d4ac4076c3a9773528d7e16129367ef9885e9dc36dcf64b516ea013a2f0/espeak_phonemizer-1.3.1.tar.gz", hash = "sha256:a591335318e253fc01599370cebc63bcc7f46155a7a7af4496fbf6ca749d0ec9", size = 10249761, upload-time = "2023-06-21T20:57:36.486Z" }
+
+[[package]]
 name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2486,6 +2492,7 @@ test = [
 training = [
     { name = "audiomentations" },
     { name = "datasets" },
+    { name = "espeak-phonemizer" },
     { name = "librosa" },
     { name = "mutagen" },
     { name = "onnx" },
@@ -2507,6 +2514,7 @@ training = [
 requires-dist = [
     { name = "audiomentations", marker = "extra == 'training'", specifier = ">=0.33.0,<1" },
     { name = "datasets", marker = "extra == 'training'", specifier = ">=2.14.6,<3" },
+    { name = "espeak-phonemizer", marker = "extra == 'training'", specifier = ">=1.3,<2" },
     { name = "flake8", marker = "extra == 'test'", specifier = ">=5.0,<8" },
     { name = "librosa", marker = "extra == 'training'", specifier = ">=0.10,<1" },
     { name = "mock", marker = "extra == 'test'", specifier = ">=5.1,<6" },
