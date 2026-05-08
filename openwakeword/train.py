@@ -291,16 +291,22 @@ class Model(nn.Module):
         averaged_model = copy.deepcopy(models[0])
         averaged_model_dict = averaged_model.state_dict()
 
-        # Initialize a running total of the weights
-        for key in averaged_model_dict:
-            averaged_model_dict[key] *= 0  # set to 0
+        # Only average float buffers/parameters. Integer buffers (e.g.
+        # BatchNorm's num_batches_tracked, which conv_attention introduces)
+        # can't be divided in-place and aren't meaningful to average — keep
+        # them from models[0].
+        avg_keys = [k for k, v in averaged_model_dict.items()
+                    if v.is_floating_point()]
+
+        for key in avg_keys:
+            averaged_model_dict[key] *= 0
 
         for model in models:
             model_dict = model.state_dict()
-            for key, value in model_dict.items():
-                averaged_model_dict[key] += value
+            for key in avg_keys:
+                averaged_model_dict[key] += model_dict[key]
 
-        for key in averaged_model_dict:
+        for key in avg_keys:
             averaged_model_dict[key] /= len(models)
 
         # Load the averaged weights into the model
