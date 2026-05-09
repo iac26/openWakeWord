@@ -248,7 +248,44 @@ fp_windows p90 score:  0.02
 ```
 
 Production-quality. Confirmed firing on real "hey ari" audio with
-threshold 0.5.
+threshold 0.5 once the deployment audio contract was correct (see
+below).
+
+## Lesson: "score = 0 on real audio" was a deployment-pipeline bug
+
+After the cloud retrain, the deployed inference engine reported
+near-zero scores (mostly 0, occasionally 0.15) on real "hey ari"
+attempts, while v5 scored 0.97 median on synthetic test data. The
+initial speculation was that this was an OOD shift between
+synthetic-Piper training data and real microphone audio — i.e. the
+model had overfit the synthetic distribution. We even sketched a
+smaller-capacity variant (`layer_size=64`, `n_conv=1`) on that
+hypothesis.
+
+The actual cause: the inference engine was passing **`float32`** PCM
+samples to `Model.predict()` instead of **`int16`**. The pipeline
+enforces int16 at `openwakeword/utils.py:_get_melspectrogram` (raises
+`ValueError` if the dtype is wrong), but the deployment path was
+casting samples to a numerically-int16-compatible representation that
+the type check accepted while the underlying buffer's range or scaling
+was wrong, so the embedding model received numerically nonsensical
+input and produced features in a region the head had been trained to
+reject. Hence "confidently zero" — not "uncertain" — on real audio.
+
+Two takeaways:
+
+1. **Score ≈ 0 on a confident model is almost always a pre-embedding
+   contract violation, not an OOD shift.** A genuine OOD shift
+   produces *uncertain* scores (0.1–0.4 range), not saturated zeros.
+   If the head is confidently rejecting real positives, the input it
+   sees is not the input you think it sees.
+2. **Write down the audio contract before debugging the model.**
+   `docs/inference_audio_contract.md` exists for this reason. Hand it
+   to whoever owns the inference engine. The diagnostic in §4 of that
+   doc — capture a real attempt to a WAV, score it via
+   `Model.predict_clip()`, and compare to live deployment scores on
+   the same utterance — would have isolated the bug in 5 minutes
+   instead of a day of model-side speculation.
 
 ## Things still open
 
@@ -265,6 +302,6 @@ threshold 0.5.
   will likely be more effective than synthetic separation alone.
 - **Real-audio FP/hr.** Current FP/hr is measured on the upstream
   `validation_set_features.npy` (~11.3 hr of mixed speech/music).
-  Real deployment audio (target environments, target microphone) is
-  out-of-distribution; expected FP rate there is unknown until we
-  collect the data.
+  Deployment audio (target environments, target microphone) is a
+  different distribution; expected FP rate there is unknown until we
+  capture and score deployment audio in bulk.

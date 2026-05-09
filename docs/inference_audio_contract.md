@@ -8,6 +8,14 @@ wake-word head was trained on.
 
 Use this as a checklist when reviewing a deployment pipeline.
 
+> **This spec already caught one real bug.** A deployment built on
+> this fork was passing `float32` samples to `Model.predict()` instead
+> of `int16`. The model scored ~0 on real "hey ari" attempts while
+> scoring 0.97 median on the synthetic test set. The fix was a
+> one-line cast on the inference side — see §3.8. Confident-zero
+> scores on a model that's confident on synthetic data are almost
+> always a pre-embedding contract violation, not a model problem.
+
 ## TL;DR
 
 ```
