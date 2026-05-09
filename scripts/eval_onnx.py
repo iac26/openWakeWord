@@ -26,13 +26,16 @@ FRAME_SECONDS = 0.08  # one openwakeword embedding frame
 
 
 def run_onnx(session: ort.InferenceSession, X: np.ndarray, batch_size: int = 256) -> np.ndarray:
-    """Run an onnx session on (N, 16, 96) features in batches; return scores in (N,).
+    """Run an onnx session on (N, n_frames, 96) features in batches; return scores in (N,).
+
+    n_frames is whatever the model was exported with (typically 16, but
+    short-command models may use 8).
 
     If the model was exported with a fixed batch dimension (older openwakeword
     .onnx files), fall back to batch_size=1 so we can still evaluate them.
     """
     if X.ndim != 3:
-        raise ValueError(f"Expected (N, 16, 96), got {X.shape}")
+        raise ValueError(f"Expected (N, n_frames, 96), got {X.shape}")
     out_name = session.get_outputs()[0].name
     in_name = session.get_inputs()[0].name
 
@@ -58,7 +61,7 @@ def run_onnx(session: ort.InferenceSession, X: np.ndarray, batch_size: int = 256
 
 
 def sliding_windows(features: np.ndarray, window: int = 16) -> np.ndarray:
-    """Convert a flat (N, 96) feature stream into (N - window + 1, 16, 96) windows.
+    """Convert a flat (N, 96) feature stream into (N - window + 1, window, 96) windows.
     Mirrors the X_val_fp construction in train.py.
     """
     if features.ndim != 2:
@@ -117,6 +120,10 @@ def main():
     in_shape = session.get_inputs()[0].shape
     print(f"ONNX input: {in_shape}", flush=True)
 
+    # The model's frame count is in_shape[1]. Older fixed-batch exports may
+    # have it at index 1 too; either way it's the second dim.
+    n_frames = int(in_shape[1])
+
     pos = np.load(args.pos_features)
     neg = np.load(args.neg_features)
     fp_raw = np.load(args.fp_features)
@@ -125,9 +132,9 @@ def main():
     print(f"Negatives: {neg.shape}", flush=True)
     print(f"FP source: {fp_raw.shape} -> {fp_hours:.3f} hours", flush=True)
 
-    # FP source is a flat (N, 96) feature stream — slide a 16-frame window.
+    # FP source is a flat (N, 96) feature stream — slide an n_frames window.
     if fp_raw.ndim == 2:
-        fp_windows = sliding_windows(fp_raw, window=16)
+        fp_windows = sliding_windows(fp_raw, window=n_frames)
     else:
         fp_windows = fp_raw
     print(f"FP windows: {fp_windows.shape}", flush=True)

@@ -1163,11 +1163,19 @@ if __name__ == '__main__':
             sr, dat = scipy.io.wavfile.read(positive_clips[np.random.randint(0, len(positive_clips))])
             duration_in_samples.append(len(dat))
 
-        config["total_length"] = int(round(np.median(duration_in_samples)/1000)*1000) + 12000  # add 750 ms to clip duration as buffer
-        if config["total_length"] < 32000:
-            config["total_length"] = 32000  # set a minimum of 32000 samples (2 seconds)
-        elif abs(config["total_length"] - 32000) <= 4000:
-            config["total_length"] = 32000
+        # If the user supplies an explicit `total_length` in the YAML, honour
+        # it verbatim — useful for short-command training where the default
+        # 2 s minimum produces 16 embedding frames; setting `total_length:
+        # 16000` (1 s) yields 8 native frames, no slicing needed.
+        if "total_length" not in config:
+            config["total_length"] = int(round(np.median(duration_in_samples)/1000)*1000) + 12000  # add 750 ms to clip duration as buffer
+            if config["total_length"] < 32000:
+                config["total_length"] = 32000  # default minimum of 2 s (= 16 frames)
+            elif abs(config["total_length"] - 32000) <= 4000:
+                config["total_length"] = 32000
+        else:
+            logging.info(f"Using user-supplied total_length={config['total_length']} samples "
+                         f"({config['total_length']/16000:.2f} s); skipping auto-computation.")
 
         if not os.path.exists(os.path.join(feature_save_dir, "positive_features_train.npy")) or args.overwrite is True:
             positive_clips_train = [str(i) for i in Path(positive_train_output_dir).glob("*.wav")]*config["augmentation_rounds"]

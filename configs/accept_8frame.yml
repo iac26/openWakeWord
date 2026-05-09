@@ -1,0 +1,79 @@
+# Accept command-word, trained on 8-frame (640 ms) input windows
+# instead of the upstream 16-frame (1.28 s) default.
+#
+# Hypothesis: short single-word commands (~400 ms) are diluted by the
+# 1.28 s window — most of the input is silence/background. Halving the
+# window doubles the signal-to-context ratio per inference and may
+# improve real-audio recall, where the synthetic vs real distribution
+# gap hurts short utterances most.
+#
+# input_shape is auto-derived from the saved positive_features_test.npy
+# shape inside auto_train (train.py line 1232), so no train.py changes
+# are needed — only the .npy files at output_dir/<model_name>/ must be
+# (N, 8, 96) instead of (N, 16, 96).
+#
+# Usage:
+#   1) Slice existing 16-frame features to 8 frames:
+#      python scripts/slice_features_to_8.py \
+#          --src_dir training_workspace/output/accept \
+#          --dst_dir training_workspace/output/accept_8frame
+#
+#   2) Train (features already exist; no clip generation needed):
+#      ./run_train.sh --training_config configs/accept_8frame.yml \
+#          --train_model
+
+model_name: "accept_8frame"
+
+# Required by the parser even when --generate_clips is not passed.
+target_phrase:
+  - "accept"
+custom_negative_phrases: []
+n_samples: 1
+n_samples_val: 1
+
+tts_batch_size: 32
+augmentation_batch_size: 32
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+background_paths_duplication_rate:
+  - 1
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+augmentation_rounds: 1
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 512    # halved from upstream 1024 to ease memory pressure on laptop
+  "adversarial_negative": 50
+  "positive": 50
+
+# Same conv_attention head as accept.yml — only the input window
+# changes. Keep capacity equal so any improvement is attributable to
+# the window size, not to a smaller / larger head.
+model_type: "conv_attention"
+layer_size: 128
+n_heads: 4
+n_conv: 2
+n_attn: 1
+
+loss_type: "focal"
+focal_gamma: 2.0
+embedding_mixup: true
+mixup_alpha: 0.2
+label_smoothing: 0.05
+weight_decay: 0.01
+
+inference_temperature: 1.0
+
+# Smaller input + same data -> converges faster than full accept.yml.
+# 50k is a reasonable starting point on laptop GPU; bump to 100k if
+# the loss is still trending down at end of phase 1.
+steps: 50000
+
+max_negative_weight: 750
+target_false_positives_per_hour: 1.0

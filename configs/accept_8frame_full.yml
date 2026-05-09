@@ -1,0 +1,96 @@
+# Option B: full pipeline regen of "accept" with native 8-frame
+# (640 ms) input windows, no slicing.
+#
+# total_length: 16000 (1 s) overrides the auto-computed 2 s minimum
+# in train.py, producing 8 embedding frames per saved feature row
+# instead of 16. The conv_attention head auto-derives input_shape
+# from the saved .npy at training time (train.py line 1232), so no
+# code changes are required beyond the total_length override that
+# this YAML triggers.
+#
+# Usage (full pipeline; ~5-8 hr on laptop GPU):
+#   ./run_train.sh --training_config configs/accept_8frame_full.yml \
+#       --generate_clips --augment_clips --train_model
+#
+# This requires the full dataset stack to be present:
+#   - training_workspace/piper-sample-generator/    (clip generation)
+#   - training_workspace/mit_rirs/                  (RIR augmentation)
+#   - training_workspace/audioset_16k/              (background audio)
+#   - training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy
+#   - training_workspace/features/validation_set_features.npy
+#
+# Run `DOWNLOAD_DATASETS=1 ./install_training.sh` if any of these are
+# missing. See README for details.
+
+model_name: "accept_8frame_full"
+
+target_phrase:
+  - "accept"
+
+custom_negative_phrases:
+  - "decline"
+  - "hello"
+  - "yes"
+  - "no"
+  - "okay"
+  - "cancel"
+  - "stop"
+  - "go back"
+
+n_samples: 100000
+n_samples_val: 2000
+
+tts_batch_size: 256
+augmentation_batch_size: 16
+
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+
+augmentation_rounds: 1
+
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+
+# ---------------------------------------------------------------------
+# Native 8-frame window: 16 000 samples = 1 s of audio = 8 embedding
+# frames at 80 ms cadence. Honoured verbatim by train.py instead of
+# the auto-computed 2 s minimum.
+# ---------------------------------------------------------------------
+total_length: 16000
+
+# Same conv_attention head as accept.yml. Holding architecture
+# capacity equal so any improvement is attributable to the input
+# window change.
+model_type: "conv_attention"
+layer_size: 128
+n_heads: 4
+n_conv: 2
+n_attn: 1
+
+loss_type: "focal"
+focal_gamma: 2.0
+embedding_mixup: true
+mixup_alpha: 0.2
+label_smoothing: 0.05
+weight_decay: 0.01
+
+inference_temperature: 1.0
+
+steps: 100000
+
+max_negative_weight: 750
+target_false_positives_per_hour: 1.0

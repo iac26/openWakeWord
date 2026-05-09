@@ -1,32 +1,40 @@
 #!/usr/bin/env bash
-# Bootstrap a Python 3.12 GPU training environment for openWakeWord (ONNX only).
+# Bootstrap a Python training environment for openWakeWord (ONNX only).
 #
-# Defaults assume a Linux host with an NVIDIA GPU. Override via env vars:
+# This script does TWO things:
+#   1) `uv sync` to create .venv from pyproject.toml + uv.lock
+#      (torch + torchaudio come from the pinned CUDA index).
+#   2) Download the data files needed for clip generation, augmentation,
+#      and training: melspec/embedding/VAD ONNXes, piper-sample-generator
+#      + voice model, the precomputed feature shards, and (optionally)
+#      MIT-RIRs / AudioSet / FMA via prepare_datasets.py.
 #
-#   PYTHON=python3.12          # which interpreter to seed the venv from
-#   VENV=.venv                 # venv directory
-#   CUDA=cu124                 # PyTorch CUDA build (cu121 / cu124 / cpu)
+# It does NOT touch system packages by default. On Pop!_OS / Ubuntu with
+# nvidia-dkms, an `apt install build-essential` will pull in linux-headers
+# and trigger a long nvidia-dkms rebuild — avoid unless you know you need
+# missing system packages. Set INSTALL_SYSTEM_PKGS=1 to opt in.
+#
+# Override via env vars:
+#
 #   WORKDIR=$PWD/training_workspace
+#   INSTALL_SYSTEM_PKGS=0      # 1 = run apt-get for system deps (fresh boxes only)
 #   DOWNLOAD_FEATURES=1        # 1 = download ~7 GB of pre-computed negative features
 #   DOWNLOAD_PIPER=1           # 1 = clone piper-sample-generator + voice model
-#   DOWNLOAD_DATASETS=0        # 1 = also fetch RIR/AudioSet/FMA via prepare_datasets.py
+#   DOWNLOAD_DATASETS=1        # 1 = fetch RIR/AudioSet/FMA via prepare_datasets.py
 #   AUDIOSET_SHARDS="bal_train09.tar"  # space-separated AudioSet tar shard names
 #   FMA_HOURS=1                # hours of FMA audio (bump for real training)
 #
 # After running:
-#   source $VENV/bin/activate
-#   python -m openwakeword.train --training_config <your.yml> \
+#   ./run_train.sh --training_config <your.yml> \
 #       --generate_clips --augment_clips --train_model
 
 set -euo pipefail
 
-PYTHON="${PYTHON:-python3.12}"
-VENV="${VENV:-.venv}"
-CUDA="${CUDA:-cu124}"
 WORKDIR="${WORKDIR:-$PWD/training_workspace}"
+INSTALL_SYSTEM_PKGS="${INSTALL_SYSTEM_PKGS:-0}"
 DOWNLOAD_FEATURES="${DOWNLOAD_FEATURES:-1}"
 DOWNLOAD_PIPER="${DOWNLOAD_PIPER:-1}"
-DOWNLOAD_DATASETS="${DOWNLOAD_DATASETS:-0}"
+DOWNLOAD_DATASETS="${DOWNLOAD_DATASETS:-1}"
 AUDIOSET_SHARDS="${AUDIOSET_SHARDS:-bal_train09.tar}"
 FMA_HOURS="${FMA_HOURS:-1}"
 
@@ -34,92 +42,38 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> openWakeWord training bootstrap (ONNX only)"
 echo "    repo:        $REPO_ROOT"
-echo "    python:      $PYTHON"
-echo "    venv:        $VENV"
-echo "    cuda build:  $CUDA"
 echo "    workdir:     $WORKDIR"
 
-# 1. System packages (Linux only) -------------------------------------------
-if [[ "$(uname -s)" == "Linux" ]]; then
+# 1. System packages (Linux only, opt-in) -----------------------------------
+# By default, do NOT touch apt — assume dev tools are already present. On
+# Pop!_OS / Ubuntu with nvidia-dkms, an `apt install build-essential` will
+# pull in linux-headers and trigger a 5-10 min nvidia-dkms rebuild. Set
+# INSTALL_SYSTEM_PKGS=1 only when bootstrapping a fresh machine that's
+# missing build-essential/ffmpeg/sox/espeak-ng/libspeexdsp-dev/libsndfile1.
+if [[ "$INSTALL_SYSTEM_PKGS" == "1" && "$(uname -s)" == "Linux" ]]; then
     echo "==> Installing system packages (sudo apt-get)"
     sudo apt-get update -qq
     sudo apt-get install -y --no-install-recommends \
         build-essential git wget curl ca-certificates \
         libspeexdsp-dev espeak-ng sox libsndfile1 ffmpeg
-fi
-
-# 2. Python venv -------------------------------------------------------------
-if [[ ! -x "$VENV/bin/python" ]]; then
-    echo "==> Creating venv with $PYTHON"
-    if command -v uv >/dev/null 2>&1; then
-        uv venv --python "$PYTHON" "$VENV"
-        PIP=("uv" "pip" "install" "--python" "$VENV/bin/python")
-    else
-        "$PYTHON" -m venv "$VENV"
-        "$VENV/bin/python" -m pip install --upgrade pip
-        PIP=("$VENV/bin/python" "-m" "pip" "install")
-    fi
 else
-    echo "==> Reusing existing venv at $VENV"
-    if command -v uv >/dev/null 2>&1; then
-        PIP=("uv" "pip" "install" "--python" "$VENV/bin/python")
-    else
-        PIP=("$VENV/bin/python" "-m" "pip" "install")
-    fi
+    echo "==> Skipping system package install (set INSTALL_SYSTEM_PKGS=1 if needed)"
 fi
 
-# 3. PyTorch + torchaudio (must be <2.6: torch>=2.6 changed torch.load
-# default to weights_only=True which rejects piper's checkpoint, and
-# torchaudio>=2.9 removed `.info()` which torch_audiomentations needs).
-echo "==> Installing PyTorch ($CUDA, torch<2.6)"
-if [[ "$CUDA" == "cpu" ]]; then
-    "${PIP[@]}" --index-url https://download.pytorch.org/whl/cpu "torch<2.6" "torchaudio<2.6"
-else
-    "${PIP[@]}" --index-url "https://download.pytorch.org/whl/$CUDA" "torch<2.6" "torchaudio<2.6"
+# 2. Python environment via uv sync -----------------------------------------
+# pyproject.toml's [tool.uv.sources] pins torch + torchaudio to the
+# PyTorch CUDA 12.4 index, so the wheels include the bundled NVIDIA libs
+# that onnxruntime-gpu dlopens at runtime. Both inference and training
+# deps live in the main `dependencies` table — no extras needed.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: 'uv' is not installed. Install it first:"
+    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
 fi
+echo "==> uv sync (creates/updates $REPO_ROOT/.venv)"
+uv sync --project "$REPO_ROOT"
 
-# 4. openWakeWord + training extras -----------------------------------------
-echo "==> Installing openwakeword[training]"
-"${PIP[@]}" -e "$REPO_ROOT[training]"
-
-# 4b. Swap onnxruntime CPU -> GPU when building against a CUDA wheel.
-# The speech_embedding model dominates the augment+features stage; running
-# it on CPU pins one core and leaves the GPU idle. Pin to 1.20.x — newer
-# 1.21+ wheels have undefined-symbol issues against torch's CUDA 12 libs.
-if [[ "$CUDA" != "cpu" ]]; then
-    echo "==> Swapping onnxruntime -> onnxruntime-gpu==1.20.* for CUDA inference"
-    if command -v uv >/dev/null 2>&1; then
-        uv pip uninstall --python "$VENV/bin/python" onnxruntime || true
-    else
-        "$VENV/bin/python" -m pip uninstall -y onnxruntime || true
-    fi
-    "${PIP[@]}" "onnxruntime-gpu>=1.20,<1.21"
-
-    # onnxruntime-gpu dlopen()s libcublas/libcudnn/etc at runtime. Torch
-    # ships its own nvidia/* CUDA 12 libs; surface them via LD_LIBRARY_PATH
-    # in a small wrapper so users don't have to set it manually.
-    cat > "$REPO_ROOT/run_train.sh" <<'EOF'
-#!/usr/bin/env bash
-# Wrapper for `python -m openwakeword.train ...` that exposes torch's
-# bundled CUDA 12 libs (cublas/cudnn/curand/...) to onnxruntime-gpu.
-# Generated by install_training.sh.
-set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="${VENV:-$HERE/.venv}"
-NV_LIB_PATH="$("$VENV/bin/python" -c '
-import os, glob, nvidia
-nv_dir = os.path.dirname(nvidia.__file__)
-print(":".join(sorted(set(os.path.dirname(p) for p in glob.glob(f"{nv_dir}/*/lib/*.so*")))))
-')"
-export LD_LIBRARY_PATH="$NV_LIB_PATH:${LD_LIBRARY_PATH:-}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-exec "$VENV/bin/python" -m openwakeword.train "$@"
-EOF
-    chmod +x "$REPO_ROOT/run_train.sh"
-    echo "    Wrote $REPO_ROOT/run_train.sh — use it instead of \`python -m openwakeword.train\`"
-fi
-
-# 5. Workspace + base feature models (ONNX only) ----------------------------
+# 3. Workspace + base feature/VAD models (ONNX) -----------------------------
 mkdir -p "$WORKDIR"
 RES_DIR="$REPO_ROOT/openwakeword/resources/models"
 mkdir -p "$RES_DIR"
@@ -139,7 +93,7 @@ for f in "${BASE_MODELS[@]}"; do
     fi
 done
 
-# 6. Piper sample generator (synthetic positive clips) ----------------------
+# 4. Piper sample generator (synthetic positive clips) ----------------------
 if [[ "$DOWNLOAD_PIPER" == "1" ]]; then
     PIPER_DIR="$WORKDIR/piper-sample-generator"
     if [[ ! -d "$PIPER_DIR" ]]; then
@@ -159,7 +113,7 @@ if [[ "$DOWNLOAD_PIPER" == "1" ]]; then
     fi
 fi
 
-# 7. Pre-computed negative features (~7 GB) ---------------------------------
+# 5. Pre-computed negative features (~7 GB) ---------------------------------
 if [[ "$DOWNLOAD_FEATURES" == "1" ]]; then
     FEAT_DIR="$WORKDIR/features"
     mkdir -p "$FEAT_DIR"
@@ -178,18 +132,18 @@ if [[ "$DOWNLOAD_FEATURES" == "1" ]]; then
     done
 fi
 
-# 8. Background datasets (RIR + AudioSet + FMA) ------------------------------
+# 6. Background datasets (RIR + AudioSet + FMA) ------------------------------
 if [[ "$DOWNLOAD_DATASETS" == "1" ]]; then
     echo "==> Preparing background datasets (RIR + AudioSet + FMA)"
-    "$VENV/bin/python" "$REPO_ROOT/prepare_datasets.py" \
+    "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/prepare_datasets.py" \
         --workdir "$WORKDIR" \
         --audioset-shards $AUDIOSET_SHARDS \
         --fma-hours "$FMA_HOURS"
 fi
 
-# 9. GPU sanity check --------------------------------------------------------
+# 7. GPU sanity check --------------------------------------------------------
 echo "==> Verifying PyTorch CUDA"
-"$VENV/bin/python" - <<'PY'
+"$REPO_ROOT/.venv/bin/python" - <<'PY'
 import torch
 print("torch:", torch.__version__)
 print("cuda available:", torch.cuda.is_available())
@@ -201,19 +155,10 @@ cat <<EOF
 
 ==> Done.
 
-Next steps:
-  1. source $VENV/bin/activate
-  2. Edit a copy of configs/custom_model.yml, pointing
-     - 'piper_sample_generator_path' at $WORKDIR/piper-sample-generator
-     - 'feature_data_files' at $WORKDIR/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy
-     - 'false_positive_validation_data_path' at $WORKDIR/features/validation_set_features.npy
-     - 'background_paths' at directories of 16 kHz WAVs (AudioSet/FSD50k/FMA)
-  3. Run:
-       python -m openwakeword.train --training_config your_config.yml \\
-         --generate_clips --augment_clips --train_model
+Run training with:
+    ./run_train.sh --training_config configs/<your_model>.yml \\
+        --generate_clips --augment_clips --train_model
 
-You still need to provide background-noise audio yourself. Suggested sources:
-  - AudioSet: https://huggingface.co/datasets/agkphysics/AudioSet
-  - FSD50k:   https://zenodo.org/record/4060432
-  - FMA:      https://github.com/mdeff/fma
+run_train.sh prefers .venv-train if it exists, otherwise .venv (the uv
+default created by this script).
 EOF

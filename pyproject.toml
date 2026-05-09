@@ -10,38 +10,32 @@ authors = [
 ]
 description = "An open-source audio wake word (or phrase) detection framework with a focus on performance and simplicity"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
+# This fork is training-only; the inference deps + training deps are merged
+# here so a single `uv sync` produces a working environment for both clip
+# generation, augmentation, and ONNX training/export. ONNX-only (no TFLite).
+# `deep-phonemizer` is opt-in (only needed for out-of-vocabulary wake words);
+# install separately if you need it.
 dependencies = [
-    "onnxruntime>=1.17.0,<2",
+    # ---- inference / shared ----
+    'onnxruntime>=1.17.0,<2; platform_system != "Linux"',
+    # On Linux + CUDA, onnxruntime-gpu is required so the Google
+    # speech_embedding model runs on GPU during --augment_clips. Pinned
+    # to 1.20.x — newer 1.21+ wheels have undefined-symbol issues
+    # against torch's CUDA 12 libs.
+    'onnxruntime-gpu>=1.20,<1.21; platform_system == "Linux"',
     'speexdsp-ns>=0.1.2,<1; platform_system == "Linux"',
     "tqdm>=4.0,<5.0",
     "scipy>=1.11,<2",
     "scikit-learn>=1.4,<2",
     "requests>=2.0,<3",
     'PyAudioWPatch; platform_system == "Windows" and platform_machine == "AMD64"',
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest>=7.4,<8",
-    "pytest-cov>=4.0,<7",
-    "pytest-flake8>=1.3.0,<2",
-    "flake8>=5.0,<8",
-    "pytest-mypy>=0.10.3,<1",
-    "types-requests",
-    "types-PyYAML",
-    "mock>=5.1,<6",
-    "types-mock>=5.1,<6",
-]
-# Training extras. Works on Python 3.10–3.12. ONNX-only (no TFLite).
-# `deep-phonemizer` is opt-in (only needed for out-of-vocabulary wake words);
-# install separately if you need it.
-training = [
+    # ---- training ----
     "mutagen>=1.46.0,<2",
     # torch>=2.6 changed `torch.load` default to weights_only=True, which
     # rejects piper-sample-generator's pickled SynthesizerTrn checkpoint;
@@ -58,7 +52,6 @@ training = [
     # 'tensor' to 'dict' — breaks our usage silently. Pin <0.12 until we
     # explicitly migrate.
     "torch-audiomentations>=0.11.0,<0.12",
-    "tqdm>=4.64.0,<5",
     "pyyaml>=6.0.1,<7",
     "pronouncing>=0.2.0,<1",
     # `datasets>=3` made torchcodec a hard requirement for the Audio feature
@@ -75,6 +68,39 @@ training = [
     "setuptools<81",
     "piper-phonemize-fix; platform_system == 'Linux'",
     "espeak-phonemizer>=1.3,<2",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4,<8",
+    "pytest-cov>=4.0,<7",
+    "pytest-flake8>=1.3.0,<2",
+    "flake8>=5.0,<8",
+    "pytest-mypy>=0.10.3,<1",
+    "types-requests",
+    "types-PyYAML",
+    "mock>=5.1,<6",
+    "types-mock>=5.1,<6",
+]
+
+# ---------------------------------------------------------------------------
+# uv-specific configuration: pull torch + torchaudio from the PyTorch CUDA
+# 12.4 index so the wheels include the bundled NVIDIA libs (cublas/cudnn/
+# curand/...). On Linux + CUDA hosts this matches what install_training.sh
+# used to do manually. Override CUDA build by changing the index URL or
+# by setting `UV_INDEX=https://download.pytorch.org/whl/<flavor>`.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", marker = "platform_system == 'Linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cu124", marker = "platform_system == 'Linux'" },
 ]
 
 [project.urls]
