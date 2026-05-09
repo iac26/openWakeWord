@@ -78,7 +78,7 @@ every 80 ms:
 ```bash
 ./install_training.sh                          # one-time: venv + torch + datasets
 python prepare_datasets.py                     # one-time: AudioSet/MIT-RIRs/FMA
-./run_train.sh --training_config examples/hey_ari.yml \
+./run_train.sh --training_config configs/hey_ari.yml \
                --generate_clips --augment_clips --train_model
 ```
 
@@ -103,9 +103,12 @@ a threshold sweep at the configured FP-per-hour target. See
 ## Repository layout
 
 ```
-examples/
+configs/
     hey_ari.yml, accept.yml, decline.yml          training configs (primary models)
+    accept_small.yml, ...                         smaller / experimental variants
     hey_ari_verifier.yml, ...                     verifier scaffolding (NOT runnable yet)
+    custom_model.yml                              template for new wake words
+examples/
     detect_from_microphone.py, capture_activations.py, ...
 openwakeword/
     train.py            auto_train pipeline (Model class, _select_best_model, export_model)

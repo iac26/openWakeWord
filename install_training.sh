@@ -203,7 +203,7 @@ cat <<EOF
 
 Next steps:
   1. source $VENV/bin/activate
-  2. Edit a copy of examples/custom_model.yml, pointing
+  2. Edit a copy of configs/custom_model.yml, pointing
      - 'piper_sample_generator_path' at $WORKDIR/piper-sample-generator
      - 'feature_data_files' at $WORKDIR/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy
      - 'false_positive_validation_data_path' at $WORKDIR/features/validation_set_features.npy

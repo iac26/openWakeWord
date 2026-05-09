@@ -141,13 +141,10 @@ examples/*
 !examples/audio
 examples/audio/*
 !examples/audio/activation.wav
-!examples/custom_model.yml
-!examples/hey_ari.yml
-!examples/accept.yml
-!examples/decline.yml
-!examples/hey_ari_verifier.yml
-!examples/accept_verifier.yml
-!examples/decline_verifier.yml
+!examples/utils
+!examples/web
+!examples/README.md
+!examples/*.py
 
 # archive files
 archive/

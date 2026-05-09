@@ -1,0 +1,79 @@
+# Local laptop training of "accept" command word — SMALLER conv_attention.
+#
+# Proof of concept: validates that the conv_attention head + the
+# float-vs-int16 inference fix transfer to the single-word command
+# models (accept / decline) before committing GPU time on the full
+# layer_size=128 variant.
+#
+# Reuses the precomputed feature .npy files that were synced down from
+# the server (training_workspace/output/accept/), symlinked into
+# training_workspace/output/accept_small/ for this run.
+#
+# Usage:
+#   ./run_train.sh --training_config \
+#       training_workspace_local/accept_small.yml --train_model
+
+model_name: "accept_small"
+
+# Required by the parser even when --generate_clips is not passed.
+target_phrase:
+  - "accept"
+custom_negative_phrases: []
+n_samples: 1
+n_samples_val: 1
+
+tts_batch_size: 32
+augmentation_batch_size: 32
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+# Not used by --train_model alone, but parser still requires the keys.
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+background_paths_duplication_rate:
+  - 1
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+augmentation_rounds: 1
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+# Same per-step batch shape as the full accept.yml. With 100k positives
+# we can afford the upstream-default size; smaller batches just slow
+# convergence.
+batch_n_per_class:
+  "ACAV100M_sample": 1024
+  "adversarial_negative": 50
+  "positive": 50
+
+# ---------------------------------------------------------------------
+# Smaller conv_attention head — same family as accept.yml, less
+# capacity. layer_size 64 + n_conv 1 is ~3.5x fewer head parameters.
+# Single-word commands have less acoustic information than wake words,
+# so a smaller head is more honest about the discrimination problem
+# and less prone to overfitting on the synthetic distribution.
+# ---------------------------------------------------------------------
+model_type: "conv_attention"
+layer_size: 64
+n_heads: 4
+n_conv: 1
+n_attn: 1
+
+# Same loss/regularisation recipe as the full configs.
+loss_type: "focal"
+focal_gamma: 2.0
+embedding_mixup: true
+mixup_alpha: 0.2
+label_smoothing: 0.05
+weight_decay: 0.01
+
+inference_temperature: 1.0
+
+# Smaller head + 100k features. 50k steps converges; bump to 100k if
+# the loss is still trending down at the end of phase 1.
+steps: 50000
+
+# Same negative-pressure target as accept.yml.
+max_negative_weight: 750
+target_false_positives_per_hour: 1.0

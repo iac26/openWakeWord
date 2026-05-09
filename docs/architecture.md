@@ -91,7 +91,7 @@ which causes the model to under-fire on the real word. That's how
 `hey jealous` ended up in the official `hey_jarvis` training set —
 synthetic, not curated.
 
-Final lists (see `examples/*.yml`):
+Final lists (see `configs/*.yml`):
 
 - `hey_ari`: clearly different wake words (`hello`, `hey siri`,
   `alexa`, `ok google`, `hey jarvis`, ...).
@@ -289,7 +289,7 @@ Two takeaways:
 
 ## Things still open
 
-- **Verifier stage.** `examples/{hey_ari,accept,decline}_verifier.yml`
+- **Verifier stage.** `configs/{hey_ari,accept,decline}_verifier.yml`
   document the intended config for a second-stage verifier (small MLP
   over mean-pooled embeddings, trained on real positives + mined hard
   negatives, fused into the ONNX via an If-node like

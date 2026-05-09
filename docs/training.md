@@ -65,7 +65,7 @@ one row = one 80 ms frame.
 
 ```bash
 ./run_train.sh \
-    --training_config examples/hey_ari.yml \
+    --training_config configs/hey_ari.yml \
     --generate_clips \
     --augment_clips \
     --train_model
@@ -89,7 +89,7 @@ pointed at torch's bundled CUDA libs. Use it instead of bare Python.
 
 ## Anatomy of a training config
 
-The shipped configs (`examples/hey_ari.yml`, `accept.yml`, `decline.yml`)
+The shipped configs (`configs/hey_ari.yml`, `configs/accept.yml`, `configs/decline.yml`)
 are heavily commented; this section explains the *why* behind each
 group of knobs.
 
