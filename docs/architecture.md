@@ -91,13 +91,18 @@ which causes the model to under-fire on the real word. That's how
 `hey jealous` ended up in the official `hey_jarvis` training set —
 synthetic, not curated.
 
-Final lists (see `configs/*.yml`):
+Current configs (`configs/*.yml`) take this one step further:
+`custom_negative_phrases` is **empty** for all three shipped models.
+The auto-generated phonetic adversarials from
+`generate_adversarial_texts` (which uses DeepPhonemizer to handle
+out-of-vocabulary words like "ari") plus ACAV100M's 2000 hr of real
+audio cover the negative space without curated lists. Hand-picked
+near-misses get added back only if production false positives reveal
+a class the auto adversarials miss.
 
-- `hey_ari`: clearly different wake words (`hello`, `hey siri`,
-  `alexa`, `ok google`, `hey jarvis`, ...).
-- `accept` / `decline`: common short responses (`hello`, `yes`, `no`,
-  `okay`, `cancel`, `stop`, `go back`) **plus** the *other* command
-  word, so the two confirmation models don't fire on each other.
+(An earlier iteration listed clearly-different wake words for `hey_ari`
+and the *other* command word for `accept`/`decline`. Both lists are
+gone now — they were redundant against the adversarial generator.)
 
 ### 4. Negative pressure: 1500 → 750, FP target 0.2 → 1.0
 
@@ -108,8 +113,15 @@ old-style adversarial generator (which included input words) the
 gradient was so heavily skewed against negatives that the model
 under-fired on the real phrase.
 
-Loosened: `max_negative_weight: 750`, `target_false_positives_per_hour:
-1.0`. Focal loss handles the tail.
+Loosened on the full tier: `max_negative_weight: 750`,
+`target_false_positives_per_hour: 1.0`. Focal loss handles the tail.
+
+The smaller tiers (`*_micro`, `*_tiny`, `*_small`) take this further:
+they use a graded ladder of 50 / 100 / 150 with a relaxed 5.0 FP/hr
+target, because at smaller data scales 750 collapses the score
+distribution toward 0 on real audio — the same failure shape as the
+int16-vs-float32 deployment bug below. See `docs/training.md` for
+the tier matrix.
 
 ### 5. Inference temperature scaling
 

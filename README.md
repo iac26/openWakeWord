@@ -76,15 +76,21 @@ every 80 ms:
 ## Training a new model
 
 ```bash
-./install_training.sh                          # one-time: venv + torch + datasets
-python prepare_datasets.py                     # one-time: AudioSet/MIT-RIRs/FMA
+./install_training.sh                          # one-time: uv sync + datasets
+# (prepare_datasets is invoked by install_training.sh; run it standalone
+# only if you need to refresh AudioSet/MIT-RIRs/FMA)
 ./run_train.sh --training_config configs/hey_ari.yml \
                --generate_clips --augment_clips --train_model
 ```
 
-Outputs `training_workspace/output/<model_name>.onnx`. See
-[docs/training.md](docs/training.md) for the full walkthrough and what
+Each of the three models (`hey_ari`, `accept`, `decline`) has four
+tier configs — `*_micro.yml`, `*_tiny.yml`, `*_small.yml`, and the
+unsuffixed full-tier config — covering everything from a 100-clip
+sanity check up to a 100 k-sample cloud run. See
+[docs/training.md](docs/training.md) for the tier matrix and what
 each config knob does.
+
+Outputs `training_workspace/output/<model_name>.onnx`.
 
 ## Evaluation
 
@@ -104,9 +110,11 @@ a threshold sweep at the configured FP-per-hour target. See
 
 ```
 configs/
-    hey_ari.yml, accept.yml, decline.yml          training configs (primary models)
-    accept_small.yml, ...                         smaller / experimental variants
-    hey_ari_verifier.yml, ...                     verifier scaffolding (NOT runnable yet)
+    hey_ari.yml, accept.yml, decline.yml          full-tier configs (100k samples, cloud-sized)
+    {hey_ari,accept,decline}_small.yml            small tier (30k samples, ~30-45 min on laptop)
+    {hey_ari,accept,decline}_tiny.yml             tiny tier (1k samples, ~10 min)
+    {hey_ari,accept,decline}_micro.yml            micro tier (100 samples, listen-to-clips sanity)
+    *_verifier.yml                                verifier scaffolding (NOT runnable yet)
     custom_model.yml                              template for new wake words
 examples/
     detect_from_microphone.py, capture_activations.py, ...
@@ -118,12 +126,13 @@ openwakeword/
     custom_verifier_model.py
 scripts/
     eval_onnx.py        local ONNX benchmark (recall/FP/hr/threshold sweep)
+    promote_clips.sh    symlink WAVs from one tier dir to the next (avoids regenerating)
 docs/
     training.md, evaluation.md, architecture.md
-    custom_verifier_models.md, synthetic_data_generation.md   (legacy, kept)
-install_training.sh     bootstrap venv + CUDA torch + piper-sample-generator
-prepare_datasets.py     download MIT-RIRs / AudioSet / FMA
-run_train.sh            wrapper exposing torch's bundled CUDA libs
+    custom_verifier_models.md, inference_audio_contract.md
+install_training.sh     bootstrap `.venv` via uv sync + datasets via prepare_datasets.py
+prepare_datasets.py     download MIT-RIRs / AudioSet (parquet) / FMA
+run_train.sh            wrapper exposing torch's bundled CUDA libs (prefers .venv-train)
 ```
 
 ## License

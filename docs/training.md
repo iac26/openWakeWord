@@ -17,22 +17,37 @@ CLI steps, one YAML config per model.
 ```
 
 What it does:
-- creates `.venv-train/` with `torch<2.6` + CUDA libs (`cu124` by default),
-- installs the `[training]` extras from `pyproject.toml`,
+- runs `uv sync` against `pyproject.toml` + `uv.lock` to create `.venv`
+  (or reuse `.venv-train` if it already exists). Inference and training
+  deps are merged into a single dep list, no extras to select. Torch +
+  torchaudio come from the pinned PyTorch CUDA 12.4 index via
+  `[tool.uv.sources]`.
 - clones `piper-sample-generator` into `training_workspace/piper-sample-generator/`,
-- pre-downloads the openWakeWord melspectrogram + embedding ONNX models,
+- pre-downloads the openWakeWord melspectrogram + embedding + VAD ONNX models,
 - pre-downloads the openWakeWord precomputed feature shards
   (`openwakeword_features_ACAV100M_2000_hrs_16bit.npy`,
-  `validation_set_features.npy`).
+  `validation_set_features.npy`),
+- optionally invokes `prepare_datasets.py` for RIR/AudioSet/FMA
+  (`DOWNLOAD_DATASETS=1` by default).
+
+By default the script does **not** touch apt — on hosts with
+`nvidia-dkms`, installing `build-essential` triggers a 5–10 min DKMS
+rebuild. Set `INSTALL_SYSTEM_PKGS=1` only on a fresh box that's
+missing `ffmpeg`, `sox`, `espeak-ng`, `libspeexdsp-dev`, or
+`libsndfile1`.
 
 Env knobs (override before invoking the script):
 
-| var                  | default       | meaning                                              |
-| -------------------- | ------------- | ---------------------------------------------------- |
-| `PYTHON`             | `python3.12`  | interpreter to use                                   |
-| `CUDA`               | `cu124`       | torch CUDA wheel suffix                              |
-| `WORKDIR`            | `$PWD/training_workspace` | where features + clips land               |
-| `DOWNLOAD_DATASETS`  | `0`           | also download AudioSet/FMA via `prepare_datasets.py` |
+| var                   | default       | meaning                                                       |
+| --------------------- | ------------- | ------------------------------------------------------------- |
+| `WORKDIR`             | `$PWD/training_workspace` | where features + clips land                       |
+| `INSTALL_SYSTEM_PKGS` | `0`           | `1` = run `apt-get install` for system deps                   |
+| `DOWNLOAD_FEATURES`   | `1`           | `1` = download the ~7 GB precomputed feature shards           |
+| `DOWNLOAD_PIPER`      | `1`           | `1` = clone piper-sample-generator + voice model              |
+| `DOWNLOAD_DATASETS`   | `1`           | `1` = invoke `prepare_datasets.py` (RIR/AudioSet/FMA)         |
+| `AUDIOSET_SUBSET`     | `balanced`    | AudioSet subset: `balanced` (~5 hr) / `unbalanced` / `eval`   |
+| `AUDIOSET_CLIPS`      | (unset)       | optional cap on AudioSet clip count                           |
+| `FMA_HOURS`           | `1`           | hours of FMA music to download                                |
 
 Everything `install_training.sh` does is idempotent — re-running is
 safe.
@@ -47,9 +62,14 @@ python prepare_datasets.py --help      # see all flags
 Downloads and converts to 16 kHz wav under `training_workspace/`:
 
 - `mit_rirs/` — MIT room-impulse-response set (used as RIR augmentation).
-- `audioset_16k/` — AudioSet shards (background noise / music). One
-  `bal_train09.tar` shard ≈ 5 hr; bump `AUDIOSET_SHARDS` for more.
-- `fma/` — FMA "small" subset music clips. Skip with `--skip-fma`.
+- `audioset_16k/` — AudioSet background noise/music. The HuggingFace
+  AudioSet repo migrated from `.tar` shards to parquet, so this step
+  now streams rows directly via `datasets.load_dataset("agkphysics/AudioSet", subset, streaming=True)`.
+  Default subset is `balanced` (~5 hr); use `--audioset-subset unbalanced`
+  for more. Gated dataset — needs an HF token (`huggingface-cli login`
+  or `HF_TOKEN=...`).
+- `fma/` — FMA "small" subset music clips. Wrapped in try/except;
+  failure to download is non-fatal. Skip with `--skip-fma`.
 
 If `--skip-fma` is used, do not list `./training_workspace/fma` under
 `background_paths` in your config, and leave
@@ -87,36 +107,84 @@ Each flag is independent and can be run separately:
 `run_train.sh` is just `python -m openwakeword.train` with `LD_LIBRARY_PATH`
 pointed at torch's bundled CUDA libs. Use it instead of bare Python.
 
+## Tier system
+
+Each of the three models ships in four tiers, all using the same
+`conv_attention` head and the same loss recipe — what changes is the
+synthetic-positive count, the head width, the number of training
+steps, and the negative-pressure schedule:
+
+| Tier  | `n_samples` | `layer_size` | `n_conv` | `steps`  | ACAV batch | pos/adv batch | `max_negative_weight` | target FP/hr |
+| ----- | ----------- | ------------ | -------- | -------- | ---------- | ------------- | --------------------- | ------------ |
+| micro |        100  |       32     |    1     |    1 000 |     128    |       10      |          50           |     5.0      |
+| tiny  |      1 000  |       32     |    1     |    5 000 |     256    |       20      |         100           |     5.0      |
+| small |     30 000  |       64     |    1     |   15 000 |     512    |       50      |         150           |     5.0      |
+| full  |    100 000  |      128     |    2     |  100 000 |    1 024   |       50      |         750           |     1.0      |
+
+Promotion workflow (re-uses WAVs across tiers via symlink, so the
+expensive Piper synthesis only happens once at the bottom tier):
+
+```bash
+./run_train.sh --training_config configs/hey_ari_micro.yml --generate_clips
+# listen to a handful of clips; if they sound clean:
+scripts/promote_clips.sh hey_ari_micro hey_ari_tiny
+./run_train.sh --training_config configs/hey_ari_tiny.yml --generate_clips --augment_clips --train_model
+# ... and so on up to full.
+```
+
+Clip generation is **incremental**: `train.py` checks how many WAVs
+already live in `positive_train/` and only synthesises the delta to
+reach `n_samples`. To force full regeneration, delete the clip dirs.
+Feature `.npy` caching is also incremental — if you change `n_samples`
+on an existing model dir, `rm <output_dir>/<model_name>/*_features_*.npy`
+to regenerate features at the new count.
+
+The `max_negative_weight` ladder is intentional: at the upstream
+default of 750 on tiny/small data the gradient is so heavily skewed
+against negatives that the score distribution collapses toward 0 on
+real audio (same shape as the deployment-pipeline bug documented in
+`inference_audio_contract.md`). The full tier still uses 750 because
+it has the data to support that pressure.
+
 ## Anatomy of a training config
 
-The shipped configs (`configs/hey_ari.yml`, `configs/accept.yml`, `configs/decline.yml`)
-are heavily commented; this section explains the *why* behind each
-group of knobs.
+The shipped configs (`configs/hey_ari.yml`, `configs/accept.yml`, `configs/decline.yml`
+and their tier variants) are heavily commented; this section explains
+the *why* behind each group of knobs.
 
 ### Phrase + adversarial negatives
 
 ```yaml
 target_phrase:
-  - "hey ari"
+  - "hey ari ."
+  - "hey ari !"
+  - "hey ari ?"
 
-custom_negative_phrases:
-  - "hello"
-  - "hey siri"
-  - ...
+custom_negative_phrases: []
 ```
 
 `target_phrase` is the list of phrases Piper synthesises positives for
-(`n_samples` is split evenly across the list). For multi-variant wake
-words use multiple entries; for `hey_ari` we ship one phrase only.
+(`n_samples` is split evenly across the list). The shipped configs use
+three intonation hints (`.`, `!`, `?`) per word so Piper produces the
+same phrase with declarative / exclamative / interrogative prosody;
+the trailing punctuation is stripped before the text is handed to
+`generate_adversarial_texts` (which uses CMUDict and doesn't recognise
+punctuation as words). We do **not** broaden the phrase with paraphrases
+("yes accept", "i accept") — that was tried and rejected because it
+trains the head to fire on the surrounding filler.
 
-`custom_negative_phrases` should be **clearly different** from the
-target phrase. Phonetic neighbours (`hey carl`, `incline` for
-`decline`) are produced automatically by
-`generate_adversarial_texts` — adding them here as well over-trains
-rejection of near-misses and causes the model to under-fire on the real
-word. Source: openWakeWord upstream guidance from dscripka. We
-relearned this the hard way; see
-[architecture.md](architecture.md#custom-negatives-near-vs-far).
+`custom_negative_phrases` is intentionally empty in all shipped
+configs. `generate_adversarial_texts` auto-generates phonetic
+near-misses for the target phrase (using DeepPhonemizer to handle
+out-of-vocabulary words like "ari"), and ACAV100M's 2000 hr of real
+audio covers the broad negative space. Phonetic neighbours added by
+hand (`hey carl`, `incline` for `decline`) double-count the same
+pressure and over-train rejection of near-misses, which causes the
+model to under-fire on the real word. Source: openWakeWord upstream
+guidance from dscripka. We relearned this the hard way; see
+[architecture.md](architecture.md#custom-negatives-near-vs-far). If
+production false positives reveal a class the auto adversarials miss,
+add specific terms here later.
 
 ### Sample counts
 
@@ -125,8 +193,11 @@ n_samples: 100000        # synthetic positives (split across target_phrase)
 n_samples_val: 2000      # synthetic positives held out for validation
 ```
 
-100 k matches upstream's `alexa` / `hey_mycroft` per-phrase scale. Below
-~30 k recall noticeably degrades.
+100 k (full tier) matches upstream's `alexa` / `hey_mycroft` per-phrase
+scale. The small tier uses 30 k and trains a deployable-quality model
+in 30–45 min on a laptop GPU. Below ~30 k recall noticeably degrades
+on real audio; the tiny (1 k) and micro (100) tiers exist to exercise
+the pipeline, not to produce usable models. See the tier table above.
 
 ### Batch sizes
 
@@ -192,7 +263,7 @@ real audio enough to be net-negative. If you want sharper scores, use
 ### Negative pressure
 
 ```yaml
-max_negative_weight: 750
+max_negative_weight: 750            # full tier only
 target_false_positives_per_hour: 1.0
 ```
 
@@ -202,8 +273,38 @@ phase if FP/hr is still above target. Upstream defaults
 (`max_negative_weight: 1500`) plus old-style adversarial negatives
 that included input words skewed gradients so heavily against
 negatives that the model under-fired on the real phrase. 750 + the
-relaxed 1.0 FP/hr target loosens that pressure; the focal loss + better
-adversarial generation handle the tail.
+relaxed 1.0 FP/hr target loosens that pressure on the full tier; the
+focal loss + better adversarial generation handle the tail.
+
+The smaller tiers use a graded ladder (50 / 100 / 150 for
+micro / tiny / small) with a relaxed 5.0 FP/hr target — at smaller
+data scales, a weight of 750 collapses the score distribution toward
+0 on real audio (same failure mode as the deployment-pipeline bug
+documented in `inference_audio_contract.md`). See the tier matrix
+above.
+
+### Piper synthesis settings
+
+```yaml
+noise_scales:    [0.667]   # acoustic noise (Piper's own default)
+noise_scale_ws:  [0.8]     # phoneme-length stochasticity (hey_ari)
+# or [0.4] for accept / decline
+length_scales:   [1.1, 1.2, 1.3]   # accept / decline only
+```
+
+All three models override `noise_scales` to `0.667` (Piper's own
+default), not upstream openwakeword's `0.98` — at 0.98 the short
+command words ("accept", "decline") come out partially garbled. Per-
+clip diversity comes from augmentation (RIRs + AudioSet background)
+rather than sampling noise.
+
+`hey_ari` keeps the Piper default `noise_scale_w=0.8` and lets
+`train.py`'s default `length_scales` (a wide `[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33]`
+sweep) apply. `accept` and `decline` override
+`noise_scale_w=0.4` and narrow `length_scales` to `[1.1, 1.2, 1.3]`:
+the wider range produced ~200 ms "accept" clips that didn't sound
+like real speech, and a higher `noise_scale_w` chopped the trailing
+`/t/` off the consonant.
 
 ### Inference temperature
 
@@ -228,8 +329,9 @@ below 0.5 will make the model never fire (we did this; see
 steps: 100000
 ```
 
-100 k steps lets the conv_attention head fully converge with a 100 k
-positive set. `auto_train` splits this across 3 phases:
+100 k steps (full tier) lets the conv_attention head fully converge
+with a 100 k positive set. Smaller tiers use proportionally fewer
+steps (see the tier matrix). `auto_train` splits this across 3 phases:
 
 1. **Full** at base LR until step `steps`.
 2. **Refinement** at LR × 0.1.
@@ -259,11 +361,12 @@ And at the parent `output_dir`:
 
 ## Smoke-test before a long run
 
-The cloud runs are ~6 hr; verify the pipeline works end-to-end on
-laptop GPU first by dropping `n_samples` to ~2000 and `steps` to
-~5000. The smoke-test should produce a non-degenerate `.onnx` (i.e.
-`scripts/eval_onnx.py` reports recall and FP/hr, even if both are bad).
-This catches:
+Full-tier cloud runs are ~6 hr; verify the pipeline works end-to-end
+on laptop GPU first by running the **tiny** tier
+(`configs/<model>_tiny.yml`, 1 k samples / 5 k steps, ~10 min). The
+smoke-test should produce a non-degenerate `.onnx` — `scripts/eval_onnx.py`
+should report recall and FP/hr, even if both are bad (a recall of
+~1% on tiny is expected). This catches:
 
 - missing piper / piper-sample-generator,
 - missing RIR / background paths,
