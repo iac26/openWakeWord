@@ -11,6 +11,7 @@ import scipy
 import collections
 import argparse
 import logging
+import re
 from tqdm import tqdm
 import yaml
 from pathlib import Path
@@ -1059,11 +1060,30 @@ if __name__ == '__main__':
         if not os.path.exists(positive_train_output_dir):
             os.mkdir(positive_train_output_dir)
         n_current_samples = len(os.listdir(positive_train_output_dir))
+        # Piper synthesis-time speech-rate variation. The default 0.5..1.33
+        # range covers very fast to slightly-slow speech. For short single-
+        # word commands (accept/decline), the 0.5x end produces ~200 ms
+        # utterances that don't sound like real speech; narrowing to e.g.
+        # [0.85, 1.0, 1.15] is more realistic. Override via `length_scales`
+        # in the YAML config.
+        length_scales = config.get(
+            "length_scales", [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33]
+        )
+        # Piper sampling temperature. Defaults to 0.98 (upstream openwakeword
+        # value), which adds aggressive entropy for diversity but can degrade
+        # phoneme clarity — sometimes "accept" sounds garbled. Piper's own
+        # default is 0.667 (cleaner, less diverse). Override via
+        # `noise_scales` (z-prior) and `noise_scale_ws` (duration-prior) in
+        # the YAML.
+        noise_scales = config.get("noise_scales", [0.98])
+        noise_scale_ws = config.get("noise_scale_ws", [0.98])
+        noise_scales_val = config.get("noise_scales_val", [1.0])
+        noise_scale_ws_val = config.get("noise_scale_ws_val", [1.0])
         if n_current_samples <= 0.95*config["n_samples"]:
             generate_samples(
                 text=config["target_phrase"], max_samples=config["n_samples"]-n_current_samples,
                 batch_size=config["tts_batch_size"],
-                noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
+                noise_scales=noise_scales, noise_scale_ws=noise_scale_ws, length_scales=length_scales,
                 output_dir=positive_train_output_dir, auto_reduce_batch_size=True,
                 file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
             )
@@ -1079,7 +1099,7 @@ if __name__ == '__main__':
         if n_current_samples <= 0.95*config["n_samples_val"]:
             generate_samples(text=config["target_phrase"], max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"],
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
+                             noise_scales=noise_scales_val, noise_scale_ws=noise_scale_ws_val, length_scales=length_scales,
                              output_dir=positive_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:
@@ -1090,12 +1110,20 @@ if __name__ == '__main__':
         if not os.path.exists(negative_train_output_dir):
             os.mkdir(negative_train_output_dir)
         n_current_samples = len(os.listdir(negative_train_output_dir))
+        # target_phrase entries may include Piper prosody hints ("accept!",
+        # "accept?"). Strip those + dedupe before feeding generate_adversarial_texts,
+        # which uses CMUDict (it doesn't know punctuation as words). The
+        # adversarial set for "accept" and "accept!" is identical anyway.
+        adv_input_phrases = list({
+            re.sub(r"[!?.,;:]+$", "", p).strip(): None for p in config["target_phrase"]
+        }.keys())
+
         if n_current_samples <= 0.95*config["n_samples"]:
             adversarial_texts = config["custom_negative_phrases"]
-            for target_phrase in config["target_phrase"]:
+            for target_phrase in adv_input_phrases:
                 adversarial_texts.extend(generate_adversarial_texts(
                     input_text=target_phrase,
-                    N=config["n_samples"]//len(config["target_phrase"]),
+                    N=config["n_samples"]//len(adv_input_phrases),
                     include_partial_phrase=1.0,
                     # Default upstream value (0.2) keeps 20% of input words
                     # verbatim, producing adversarials like "hey <near-rhyme>"
@@ -1106,7 +1134,7 @@ if __name__ == '__main__':
                     include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//3,
-                             noise_scales=[0.98], noise_scale_ws=[0.98], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
+                             noise_scales=noise_scales, noise_scale_ws=noise_scale_ws, length_scales=length_scales,
                              output_dir=negative_train_output_dir, auto_reduce_batch_size=True,
                              file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
                              )
@@ -1121,10 +1149,10 @@ if __name__ == '__main__':
         n_current_samples = len(os.listdir(negative_test_output_dir))
         if n_current_samples <= 0.95*config["n_samples_val"]:
             adversarial_texts = config["custom_negative_phrases"]
-            for target_phrase in config["target_phrase"]:
+            for target_phrase in adv_input_phrases:
                 adversarial_texts.extend(generate_adversarial_texts(
                     input_text=target_phrase,
-                    N=config["n_samples_val"]//len(config["target_phrase"]),
+                    N=config["n_samples_val"]//len(adv_input_phrases),
                     include_partial_phrase=1.0,
                     # Default upstream value (0.2) keeps 20% of input words
                     # verbatim, producing adversarials like "hey <near-rhyme>"
@@ -1135,7 +1163,7 @@ if __name__ == '__main__':
                     include_input_words=0.0))
             generate_samples(text=adversarial_texts, max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"]//3,
-                             noise_scales=[1.0], noise_scale_ws=[1.0], length_scales=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.33],
+                             noise_scales=noise_scales_val, noise_scale_ws=noise_scale_ws_val, length_scales=length_scales,
                              output_dir=negative_test_output_dir, auto_reduce_batch_size=True)
             torch.cuda.empty_cache()
         else:

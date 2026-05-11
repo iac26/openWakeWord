@@ -71,103 +71,57 @@ def download_mit_rirs(out_dir: Path) -> None:
         _write_wav16(target, row["audio"]["array"])
 
 
-def _resolve_audioset_shards(repo_id: str, requested: list[str]) -> list[str]:
-    """Map requested shard names to actual paths in the repo, listing files via the HF API."""
-    from huggingface_hub import HfApi
-    from huggingface_hub.utils import GatedRepoError, HfHubHTTPError
+def download_audioset(workdir: Path, subset: str = "balanced", max_clips: int | None = None) -> None:
+    """Download AudioSet via the parquet-format HuggingFace dataset and
+    resample each clip to 16 kHz wav.
 
-    api = HfApi()
-    try:
-        all_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-    except (GatedRepoError, HfHubHTTPError) as e:
-        log.error(
-            "Could not list files in %s: %s\n"
-            "This dataset is gated. Accept the license at "
-            "https://huggingface.co/datasets/%s then run "
-            "`huggingface-cli login` (or export HF_TOKEN) and retry.",
-            repo_id, e, repo_id,
-        )
-        raise
+    `agkphysics/AudioSet` is gated — `huggingface-cli login` (or set
+    HF_TOKEN) before running this. The repo migrated from `.tar` shards
+    to parquet sometime in 2024-2025; we now stream rows directly via
+    `datasets.load_dataset`, which decodes the embedded audio per row.
 
-    tars = [f for f in all_files if f.endswith(".tar")]
-    if not tars:
-        log.error(
-            "No .tar shards found in %s (repo may have been migrated to parquet). "
-            "Available top-level files: %s",
-            repo_id, sorted({f.split('/')[0] for f in all_files})[:20],
-        )
-        raise SystemExit(1)
-
-    resolved: list[str] = []
-    for shard in requested:
-        # Match by exact path, basename, or substring (e.g. "bal_train09" or "bal_train09.tar")
-        cand = [f for f in tars if f == shard or Path(f).name == shard or shard in f]
-        if not cand:
-            log.error(
-                "Requested AudioSet shard %r not found in %s.\n"
-                "Available .tar shards (first 20): %s",
-                shard, repo_id, tars[:20],
-            )
-            raise SystemExit(1)
-        if len(cand) > 1:
-            log.warning("Multiple matches for %r, using %s", shard, cand[0])
-        resolved.append(cand[0])
-    return resolved
-
-
-def download_audioset(workdir: Path, shards: list[str]) -> None:
-    """Download AudioSet shards, extract, resample to 16 kHz wav.
-
-    `agkphysics/AudioSet` is a gated HuggingFace dataset; you must
-    `huggingface-cli login` (or set HF_TOKEN) before running this. We use
-    `hf_hub_download` so the token is sent automatically, and we resolve the
-    requested shard names against the actual repo file list (the layout has
-    moved between `data/*.tar` and `data/{balanced,unbalanced}/*.tar` in the
-    past).
+    Subsets:
+      "balanced"   (~22k clips, ~5 hr)   — default, enough for a POC
+      "unbalanced" (~2M clips, ~5500 hr) — full set, several hundred GB
+      "eval"       (~22k clips, ~5 hr)   — eval split, generally avoid
     """
     import datasets
-    from huggingface_hub import hf_hub_download
 
-    raw_dir = workdir / "audioset"
-    raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir = workdir / "audioset_16k"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    repo_id = "agkphysics/AudioSet"
-    _section(f"AudioSet ({len(shards)} shard(s)) -> {out_dir}")
-    resolved = _resolve_audioset_shards(repo_id, shards)
+    _section(f"AudioSet[{subset}] -> {out_dir}"
+             + (f" (cap: {max_clips} clips)" if max_clips else ""))
 
-    for shard_path in resolved:
-        local_name = Path(shard_path).name
-        tar_path = raw_dir / local_name
-        if not tar_path.exists() or tar_path.stat().st_size < 1024:
-            print(f"  download  {shard_path}")
-            cached = hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=shard_path)
-            try:
-                os.symlink(cached, tar_path)
-            except FileExistsError:
-                pass
-        else:
-            print(f"  cached    {local_name}")
-
-        print(f"  extract   {local_name}")
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(raw_dir)
-
-    flacs = sorted(str(p) for p in (raw_dir / "audio").rglob("*.flac"))
-    if not flacs:
-        log.warning("No FLAC files found in %s/audio after extraction.", raw_dir)
-        return
-
-    print(f"  resample  {len(flacs)} clips -> {out_dir}")
-    ds = datasets.Dataset.from_dict({"audio": flacs})
+    ds = datasets.load_dataset(
+        "agkphysics/AudioSet",
+        subset,
+        split="train" if subset != "eval" else "test",
+        streaming=True,
+        trust_remote_code=False,
+    )
     ds = ds.cast_column("audio", datasets.Audio(sampling_rate=TARGET_SR))
-    for row in tqdm(ds, desc="audioset_16k", bar_format=_BAR_FMT, unit="clip"):
-        name = Path(row["audio"]["path"]).name.replace(".flac", ".wav")
-        target = out_dir / name
+
+    n_written = 0
+    n_skipped = 0
+    pbar = tqdm(ds, desc=f"audioset_16k", bar_format=_BAR_FMT, unit="clip",
+                total=max_clips)
+    for row in pbar:
+        if max_clips is not None and (n_written + n_skipped) >= max_clips:
+            break
+        # Path inside the parquet has the form "audio/<id>.flac" or similar
+        src_path = Path(row["audio"]["path"]).name
+        target = out_dir / src_path.replace(".flac", ".wav").replace(".mp3", ".wav")
+        if target.suffix != ".wav":
+            target = target.with_suffix(".wav")
         if target.exists():
+            n_skipped += 1
             continue
         _write_wav16(target, row["audio"]["array"])
+        n_written += 1
+    pbar.close()
+    log.info("AudioSet[%s]: wrote %d new clips, %d already on disk",
+             subset, n_written, n_skipped)
 
 
 def download_fma(out_dir: Path, n_hours: float) -> None:
@@ -208,9 +162,13 @@ def main() -> int:
     parser.add_argument("--skip-rirs", action="store_true", help="Skip MIT RIR download")
     parser.add_argument("--skip-audioset", action="store_true", help="Skip AudioSet download")
     parser.add_argument("--skip-fma", action="store_true", help="Skip FMA download")
-    parser.add_argument("--audioset-shards", nargs="+", default=["bal_train09.tar"],
-                        help="AudioSet tar shard filenames to fetch from HuggingFace "
-                             "(default: bal_train09.tar — one ~1 GB shard).")
+    parser.add_argument("--audioset-subset", default="balanced",
+                        choices=["balanced", "unbalanced", "eval"],
+                        help="AudioSet subset (default: balanced ~22k clips ~5 hr). "
+                             "'unbalanced' is the full ~2M-clip set (several hundred GB).")
+    parser.add_argument("--audioset-clips", type=int, default=None,
+                        help="Cap AudioSet at this many clips (default: full subset). "
+                             "Useful for quick POCs — try 5000 for ~1 hr of audio.")
     parser.add_argument("--fma-hours", type=float, default=1.0,
                         help="Hours of FMA audio to download (default: 1.0). "
                              "Bump to 50+ for real training runs.")
@@ -223,9 +181,24 @@ def main() -> int:
         if not args.skip_rirs:
             download_mit_rirs(args.workdir / "mit_rirs")
         if not args.skip_audioset:
-            download_audioset(args.workdir, args.audioset_shards)
+            try:
+                download_audioset(args.workdir, args.audioset_subset, args.audioset_clips)
+            except Exception as e:
+                log.error("AudioSet download failed: %s", e)
+                log.error("AudioSet is gated. Accept the license at "
+                          "https://huggingface.co/datasets/agkphysics/AudioSet "
+                          "and run `huggingface-cli login` (or export HF_TOKEN), then re-run.")
         if not args.skip_fma:
-            download_fma(args.workdir / "fma", args.fma_hours)
+            # FMA via rudraml/fma's custom loader is fragile (streaming/ZIP
+            # interaction with fsspec HTTP). If it fails, log and continue
+            # so AudioSet (the primary noise source) still has a chance to
+            # populate audioset_16k/.
+            try:
+                download_fma(args.workdir / "fma", args.fma_hours)
+            except Exception as e:
+                log.error("FMA download failed: %s", e)
+                log.error("FMA is optional — AudioSet alone is sufficient as a "
+                          "background-noise source. Continuing.")
     except ImportError as e:
         log.error("Missing dependency: %s. Run `pip install -e .[training]` first.", e)
         return 2

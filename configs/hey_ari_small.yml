@@ -1,17 +1,20 @@
-# accept SMALL tier — 10k samples, ~35k-param head, ~30-45 min on laptop.
-# See hey_ari_small.yml for full tier rationale.
+# hey_ari SMALL tier — 10k samples, ~35k-param head, ~30-45 min on laptop.
 #
-# Reuses accept_tiny's WAVs:
-#   scripts/promote_clips.sh accept_tiny accept_small
-#   ./run_train.sh --training_config configs/accept_small.yml \
+# Purpose: a deployable model for testing. Real-world recall should be
+# usable but below the 100k full-tier model. Trains in laptop time so
+# iteration is cheap.
+#
+# Reuses hey_ari_tiny's WAVs via symlink:
+#   scripts/promote_clips.sh hey_ari_tiny hey_ari_small
+#   ./run_train.sh --training_config configs/hey_ari_small.yml \
 #       --generate_clips --augment_clips --train_model
 
-model_name: "accept_small"
+model_name: "hey_ari_small"
 
 target_phrase:
-  - "accept ."
-  - "accept !"
-  - "accept ?"
+  - "hey ari ."
+  - "hey ari !"
+  - "hey ari ?"
 
 # No custom negative phrases — the auto-generated phonetic
 # adversarials from generate_adversarial_texts (the model still
@@ -50,10 +53,11 @@ batch_n_per_class:
   "positive": 50
 
 noise_scales: [0.667]
-noise_scale_ws: [0.4]
+noise_scale_ws: [0.8]
 noise_scales_val: [0.667]
-noise_scale_ws_val: [0.4]
-length_scales: [1.1, 1.2, 1.3]
+noise_scale_ws_val: [0.8]
+# ~35k params: layer_size 64 + n_conv 1. Same family as the full tier
+# (just narrower). Suited to 10k samples.
 model_type: "conv_attention"
 layer_size: 64
 n_heads: 4

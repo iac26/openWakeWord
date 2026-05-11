@@ -4,34 +4,18 @@
 
 model_name: "hey_ari"
 
-# Both phrases are accepted wake words. Piper synthesises positives across
-# the list (n_samples is split evenly), and adversarial negatives are
-# generated per-phrase. n_samples is doubled below to keep ~100k positives
-# per variant.
 target_phrase:
-  - "hey ari"
+  - "hey ari ."
+  - "hey ari !"
+  - "hey ari ?"
 
-# Custom negative phrases should be CLEARLY DIFFERENT from the wake word
-# — common phrases the system might encounter, NOT phonetic neighbours.
-#
-# Source: openWakeWord upstream evaluations (Neural Engineer / dscripka).
-# Verbatim guidance: "training on phonetically similar phrases like
-# 'hey call' or 'hey carl' actually hurts performance, and only clearly
-# different phrases like 'hello', 'hey siri', 'alexa' should be used".
-# Phonetic near-rhymes are already produced automatically by
-# generate_adversarial_texts; that's where 'hey jealous' came from in
-# the official hey_jarvis training set, NOT from a curated list.
-#
-# Add real false-positive triggers observed in deployment after the
-# initial model is in use.
-custom_negative_phrases:
-  - "hello"
-  - "hey siri"
-  - "alexa"
-  - "ok google"
-  - "hey google"
-  - "computer"
-  - "hey jarvis"
+# No custom negative phrases — the auto-generated phonetic
+# adversarials from generate_adversarial_texts (the model still
+# learns to reject 'except', 'accent', etc.) plus ACAV100M's
+# 2000 hr of real audio cover the negative space without curated
+# noise. Add specific terms here later only if production false
+# positives reveal a class the auto adversarials miss.
+custom_negative_phrases: []
 
 # Synthetic positives. 200k = ~100k per phrase variant, matching the
 # upstream alexa/hey_mycroft per-phrase training scale. Going below ~30k
@@ -119,6 +103,17 @@ weight_decay: 0.01
 # make the model never fire — pick T based on the sweep's recommended
 # threshold + observed score distribution, not blindly.
 inference_temperature: 1.0
+
+# Piper sampling temperature — verified by listening that 0.98 (the
+# upstream default) produces partially-garbled positives for short
+# commands. For hey_ari (4 syllables) the impact is smaller because
+# of phonetic redundancy, but 0.667 (Piper's own default) produces
+# cleaner clips without giving up much diversity. Augmentation
+# (RIRs + AudioSet) provides per-clip variation independently.
+noise_scales: [0.667]
+noise_scale_ws: [0.8]
+noise_scales_val: [0.667]
+noise_scale_ws_val: [0.8]
 
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000

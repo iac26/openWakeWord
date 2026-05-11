@@ -1,16 +1,12 @@
-# accept FULL tier — 100k samples, ~178k-param head (v5 architecture).
+# accept TINY tier — 1k samples, ~10k-param head, ~10 min on laptop.
+# See hey_ari_tiny.yml for full tier rationale.
 #
-# Top of the accept_micro -> accept_tiny -> accept_small -> accept
-# tier chain. Reuses smaller-tier WAVs:
-#   scripts/promote_clips.sh accept_small accept
-#   ./run_train.sh --training_config configs/accept.yml \
+# Reuses accept_micro's WAVs:
+#   scripts/promote_clips.sh accept_micro accept_tiny
+#   ./run_train.sh --training_config configs/accept_tiny.yml \
 #       --generate_clips --augment_clips --train_model
-#
-# tts_batch_size 256 is sized for cloud GPUs (Piper synthesis is GPU
-# bound). On a 4 GB laptop GPU, lower to 16 — but the full tier is
-# really meant for the cloud, ~6 hr of A10/L40S time.
 
-model_name: "accept"
+model_name: "accept_tiny"
 
 target_phrase:
   - "accept ."
@@ -25,11 +21,10 @@ target_phrase:
 # positives reveal a class the auto adversarials miss.
 custom_negative_phrases: []
 
-n_samples: 100000
-n_samples_val: 2000
+n_samples: 1000
+n_samples_val: 200
 
-# Cloud-sized batch. On laptop GPU, lower to 16.
-tts_batch_size: 256
+tts_batch_size: 16
 augmentation_batch_size: 16
 
 piper_sample_generator_path: "./training_workspace/piper-sample-generator"
@@ -50,27 +45,19 @@ feature_data_files:
   "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 
 batch_n_per_class:
-  "ACAV100M_sample": 1024
-  "adversarial_negative": 50
-  "positive": 50
+  "ACAV100M_sample": 256
+  "adversarial_negative": 20
+  "positive": 20
 
-# Piper sampling — verified by listening that 0.98 (the upstream
-# default) produces partially-garbled "accept" clips. 0.667 (Piper's
-# own default) gives clean phonemes; per-clip diversity comes from
-# augmentation (RIRs + AudioSet noise) instead of sampling noise.
 noise_scales: [0.667]
 noise_scale_ws: [0.4]
 noise_scales_val: [0.667]
 noise_scale_ws_val: [0.4]
-
-# Narrower than the upstream [0.5..1.33] default. The 0.5x end
-# produces ~200 ms "accept" that doesn't sound like real speech.
 length_scales: [1.1, 1.2, 1.3]
-# v5 architecture — same conv_attention head as hey_ari.yml.
 model_type: "conv_attention"
-layer_size: 128
+layer_size: 32
 n_heads: 4
-n_conv: 2
+n_conv: 1
 n_attn: 1
 
 loss_type: "focal"
@@ -81,6 +68,6 @@ label_smoothing: 0.05
 weight_decay: 0.01
 inference_temperature: 1.0
 
-steps: 100000
-max_negative_weight: 750
-target_false_positives_per_hour: 1.0
+steps: 5000
+max_negative_weight: 100
+target_false_positives_per_hour: 5.0

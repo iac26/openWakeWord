@@ -1,17 +1,19 @@
-# accept SMALL tier — 10k samples, ~35k-param head, ~30-45 min on laptop.
-# See hey_ari_small.yml for full tier rationale.
+# decline MICRO tier — 100 synthetic samples for data-quality inspection.
+# See hey_ari_micro.yml for the full rationale.
 #
-# Reuses accept_tiny's WAVs:
-#   scripts/promote_clips.sh accept_tiny accept_small
-#   ./run_train.sh --training_config configs/accept_small.yml \
-#       --generate_clips --augment_clips --train_model
+# Listen-then-promote workflow:
+#   ./run_train.sh --training_config configs/decline_micro.yml --generate_clips
+#   for f in $(ls training_workspace/output/decline_micro/positive_train/ | shuf | head -3); do
+#       paplay training_workspace/output/decline_micro/positive_train/$f
+#   done
+#   scripts/promote_clips.sh decline_micro decline_tiny
 
-model_name: "accept_small"
+model_name: "decline_micro"
 
 target_phrase:
-  - "accept ."
-  - "accept !"
-  - "accept ?"
+  - "decline ."
+  - "decline !"
+  - "decline ?"
 
 # No custom negative phrases — the auto-generated phonetic
 # adversarials from generate_adversarial_texts (the model still
@@ -21,8 +23,8 @@ target_phrase:
 # positives reveal a class the auto adversarials miss.
 custom_negative_phrases: []
 
-n_samples: 30000
-n_samples_val: 1000
+n_samples: 100
+n_samples_val: 50
 
 tts_batch_size: 16
 augmentation_batch_size: 16
@@ -45,9 +47,9 @@ feature_data_files:
   "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 
 batch_n_per_class:
-  "ACAV100M_sample": 512
-  "adversarial_negative": 50
-  "positive": 50
+  "ACAV100M_sample": 128
+  "adversarial_negative": 10
+  "positive": 10
 
 noise_scales: [0.667]
 noise_scale_ws: [0.4]
@@ -55,7 +57,7 @@ noise_scales_val: [0.667]
 noise_scale_ws_val: [0.4]
 length_scales: [1.1, 1.2, 1.3]
 model_type: "conv_attention"
-layer_size: 64
+layer_size: 32
 n_heads: 4
 n_conv: 1
 n_attn: 1
@@ -68,6 +70,6 @@ label_smoothing: 0.05
 weight_decay: 0.01
 inference_temperature: 1.0
 
-steps: 15000
-max_negative_weight: 150
+steps: 1000
+max_negative_weight: 50
 target_false_positives_per_hour: 5.0

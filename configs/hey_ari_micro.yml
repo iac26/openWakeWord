@@ -1,0 +1,87 @@
+# hey_ari MICRO tier — 100 synthetic samples for data-quality inspection.
+#
+# Purpose: generate clips and listen to them. NOT a useful model.
+# Train can run for sanity-check (~3 min) but the result will be a
+# random classifier. Use this only to validate that synthesis sounds
+# correct before scaling up.
+#
+# After running --generate_clips, listen to a sample:
+#   for f in $(ls training_workspace/output/hey_ari_micro/positive_train/ | shuf | head -3); do
+#       paplay training_workspace/output/hey_ari_micro/positive_train/$f
+#   done
+#
+# If clips sound clear ("hey ari"), promote to the next tier:
+#   scripts/promote_clips.sh hey_ari_micro hey_ari_tiny
+#   ./run_train.sh --training_config configs/hey_ari_tiny.yml \
+#       --generate_clips --augment_clips --train_model
+
+model_name: "hey_ari_micro"
+
+target_phrase:
+  - "hey ari ."
+  - "hey ari !"
+  - "hey ari ?"
+
+# No custom negative phrases — the auto-generated phonetic
+# adversarials from generate_adversarial_texts (the model still
+# learns to reject 'except', 'accent', etc.) plus ACAV100M's
+# 2000 hr of real audio cover the negative space without curated
+# noise. Add specific terms here later only if production false
+# positives reveal a class the auto adversarials miss.
+custom_negative_phrases: []
+
+n_samples: 100
+n_samples_val: 50
+
+# Laptop GPU sized.
+tts_batch_size: 16
+augmentation_batch_size: 16
+
+piper_sample_generator_path: "./training_workspace/piper-sample-generator"
+output_dir: "./training_workspace/output"
+
+rir_paths:
+  - "./training_workspace/mit_rirs"
+background_paths:
+  - "./training_workspace/audioset_16k"
+background_paths_duplication_rate:
+  - 1
+
+false_positive_validation_data_path: "./training_workspace/features/validation_set_features.npy"
+
+augmentation_rounds: 1
+
+feature_data_files:
+  "ACAV100M_sample": "./training_workspace/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+
+batch_n_per_class:
+  "ACAV100M_sample": 128
+  "adversarial_negative": 10
+  "positive": 10
+
+# Piper defaults — produce intelligible speech, not the upstream
+# noise_scales=0.98 which corrupts phoneme clarity for short words.
+noise_scales: [0.667]
+noise_scale_ws: [0.8]
+noise_scales_val: [0.667]
+noise_scale_ws_val: [0.8]
+# Smallest viable conv_attention head — ~10k params. Enough capacity
+# for the pipeline to exercise; not enough to learn anything from 100
+# samples. The model's eval result is meaningless at this tier.
+model_type: "conv_attention"
+layer_size: 32
+n_heads: 4
+n_conv: 1
+n_attn: 1
+
+loss_type: "focal"
+focal_gamma: 2.0
+embedding_mixup: true
+mixup_alpha: 0.2
+label_smoothing: 0.05
+weight_decay: 0.01
+inference_temperature: 1.0
+
+steps: 1000
+max_negative_weight: 50
+target_false_positives_per_hour: 5.0

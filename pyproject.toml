@@ -68,6 +68,10 @@ dependencies = [
     "setuptools<81",
     "piper-phonemize-fix; platform_system == 'Linux'",
     "espeak-phonemizer>=1.3,<2",
+    # DeepPhonemizer is needed by openwakeword.data.generate_adversarial_texts
+    # whenever any word in target_phrase is out-of-vocabulary in CMUDict
+    # ("ari", "jarvis", custom names) — falls through to neural g2p inference.
+    "deep-phonemizer>=0.0.19,<1",
 ]
 
 [project.optional-dependencies]
