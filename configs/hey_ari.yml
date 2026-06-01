@@ -115,6 +115,21 @@ noise_scale_ws: [0.8]
 noise_scales_val: [0.667]
 noise_scale_ws_val: [0.8]
 
+# Gender-balanced synthetic positives. Piper's libritts speaker pool is only
+# ~12% female-range (median F0 ~138 Hz), so an unweighted "hey ari" model
+# under-fires for women. speaker_f0_path points at a {speaker_id: median_f0_hz}
+# map (regenerate with scripts/measure_speaker_f0.py if you change the voice
+# model); training then oversamples speakers per speaker_band_targets so the
+# positives reach a ~balanced split that also covers higher female pitches.
+# Remove speaker_f0_path to revert to the upstream unweighted behaviour.
+speaker_f0_path: "./training_workspace/piper-sample-generator/models/en-us-libritts-high.pt.f0.json"
+speaker_band_targets:    # [low_hz, high_hz, share_of_positives]
+  - [0, 150, 0.38]
+  - [150, 175, 0.27]
+  - [175, 200, 0.22]
+  - [200, 250, 0.10]
+  - [250, 9999, 0.03]
+
 # 100k steps lets the larger model fully converge with the larger dataset.
 steps: 100000
 

@@ -6,6 +6,8 @@ import copy
 import os
 import sys
 import uuid
+import json
+import random
 import numpy as np
 import scipy
 import collections
@@ -19,6 +21,58 @@ import openwakeword
 from openwakeword.data import generate_adversarial_texts, augment_clips, mmap_batch_generator
 from openwakeword.utils import compute_features_from_generator
 from openwakeword.utils import AudioFeatures
+
+
+# Default per-F0-band target shares for the synthetic positives, as
+# [low_hz, high_hz, share] rows. Piper's libritts pool is ~12% female-range
+# (median ~138 Hz), so the unweighted model under-fires for women. These
+# targets lift it to a roughly balanced split that reaches the higher female
+# pitches without overshooting. Tune via `speaker_band_targets` in the config.
+DEFAULT_SPEAKER_BAND_TARGETS = [
+    [0, 150, 0.38],
+    [150, 175, 0.27],
+    [175, 200, 0.22],
+    [200, 250, 0.10],
+    [250, 9999, 0.03],
+]
+
+
+def build_speaker_pool(f0_path, band_targets=None, seed=1234, pool_size=50000):
+    """Build a gender-weighted speaker-id pool for synthetic positive clips.
+
+    `f0_path` is a `{speaker_id: median_f0_hz}` JSON map produced by
+    scripts/measure_speaker_f0.py (voice-model specific). Each speaker is
+    repeated in the returned list in proportion to its band's target share /
+    band population, so that generate_samples — which draws speaker pairs by
+    uniform random sampling from this list — realizes the requested per-band
+    F0 distribution. Returns a flat list[int] of speaker ids.
+
+    pool_size must stay large (>= ~50x speaker count): per-speaker repeat
+    counts are integer-rounded, so a small pool inflates over-populated bands
+    (the `max(1, round())` floor rounds their sub-1 counts up to 1), skewing
+    the realized distribution away from band_targets. At 50k the rounding
+    error is negligible; the list is only ints, so the memory cost is trivial.
+    """
+    band_targets = band_targets or DEFAULT_SPEAKER_BAND_TARGETS
+    with open(f0_path) as f:
+        f0_map = {int(k): v for k, v in json.load(f).items() if v is not None}
+
+    weights = {}
+    for lo, hi, share in band_targets:
+        members = [s for s, f0 in f0_map.items() if lo <= f0 < hi]
+        if not members:
+            logging.warning(f"No speakers in F0 band [{lo}, {hi}) — skipping (share {share} dropped)")
+            continue
+        per_speaker = share / len(members)
+        for s in members:
+            weights[s] = per_speaker
+
+    total = sum(weights.values()) or 1.0
+    pool = []
+    for s, w in weights.items():
+        pool.extend([s] * max(1, round(w / total * pool_size)))
+    random.Random(seed).shuffle(pool)
+    return pool
 
 
 # Base model class for an openwakeword model
@@ -729,8 +783,11 @@ class Model(nn.Module):
         # Train model
         accumulation_steps = 1
         accumulated_samples = 0
-        accumulated_predictions = torch.Tensor([]).to(self.device)
-        accumulated_labels = torch.Tensor([]).to(self.device)
+        # 2-D empty (not torch.Tensor([]), which is 1-D) so the first
+        # torch.cat with a 2-D (N, 1) prediction batch can't raise a
+        # dimension-mismatch when a cycle's first sub-batch is < 128 samples.
+        accumulated_predictions = torch.empty((0, 1), device=self.device)
+        accumulated_labels = torch.empty((0, 1), device=self.device)
         for step_ndx, data in tqdm(enumerate(X, 0), total=max_steps, desc="Training"):
             # get the inputs; data is a list of [inputs, labels]
             x, y = data[0].to(self.device), data[1].to(self.device)
@@ -817,16 +874,20 @@ class Model(nn.Module):
                 loss = self.loss(predictions, y_ if self.n_classes == 1 else y, w.to(self.device))
                 accumulated_samples += predictions.shape[0]
 
-                if predictions.shape[0] >= 128:
-                    accumulated_predictions = predictions
-                    accumulated_labels = y_
-
                 loss.backward()  # raw grads accumulate into .grad
+
+                # Accumulate predictions/labels for the training-side metrics,
+                # detached (they never backprop). Done unconditionally and
+                # before the branch so the sub-batch that crosses the 128
+                # threshold is counted too — previously the append lived only
+                # in the `< 128` branch, so the triggering sub-batch was
+                # dropped from the reported n_fp / recall whenever a step
+                # spanned multiple sub-batches.
+                accumulated_predictions = torch.cat((accumulated_predictions, predictions.detach()))
+                accumulated_labels = torch.cat((accumulated_labels, y_.detach()))
 
                 if accumulated_samples < 128:
                     accumulation_steps += 1
-                    accumulated_predictions = torch.cat((accumulated_predictions, predictions))
-                    accumulated_labels = torch.cat((accumulated_labels, y_))
                 else:
                     if accumulation_steps > 1:
                         # Average the accumulated gradients across sub-batches
@@ -857,8 +918,8 @@ class Model(nn.Module):
                     self.recall.reset()
                     self.history["recall"].append(self.recall(accumulated_predictions, metric_labels).detach().cpu().numpy())
 
-                    accumulated_predictions = torch.Tensor([]).to(self.device)
-                    accumulated_labels = torch.Tensor([]).to(self.device)
+                    accumulated_predictions = torch.empty((0, 1), device=self.device)
+                    accumulated_labels = torch.empty((0, 1), device=self.device)
 
             # Validation block. Switch the model to eval mode for the entire
             # block — without this, BatchNorm uses the val-batch statistics
@@ -1079,12 +1140,29 @@ if __name__ == '__main__':
         noise_scale_ws = config.get("noise_scale_ws", [0.98])
         noise_scales_val = config.get("noise_scales_val", [1.0])
         noise_scale_ws_val = config.get("noise_scale_ws_val", [1.0])
+        # Gender-weighted speaker pool for the positive clips. Without it the
+        # libritts pool is ~12% female-range and the model under-fires for
+        # women (see scripts/measure_speaker_f0.py). Opt in by setting
+        # `speaker_f0_path` in the config; absent that, speaker_ids stays None
+        # and generate_samples keeps its default (unweighted) speaker pairing.
+        # Only the positive clips are weighted — negative-class gender is moot.
+        positive_speaker_ids = None
+        speaker_f0_path = config.get("speaker_f0_path")
+        if speaker_f0_path:
+            positive_speaker_ids = build_speaker_pool(
+                speaker_f0_path,
+                config.get("speaker_band_targets"),
+                seed=config.get("speaker_pool_seed", 1234),
+            )
+            logging.info(f"Using gender-weighted speaker pool ({len(positive_speaker_ids)} "
+                         f"entries) from {speaker_f0_path}")
         if n_current_samples <= 0.95*config["n_samples"]:
             generate_samples(
                 text=config["target_phrase"], max_samples=config["n_samples"]-n_current_samples,
                 batch_size=config["tts_batch_size"],
                 noise_scales=noise_scales, noise_scale_ws=noise_scale_ws, length_scales=length_scales,
                 output_dir=positive_train_output_dir, auto_reduce_batch_size=True,
+                speaker_ids=positive_speaker_ids,
                 file_names=[uuid.uuid4().hex + ".wav" for i in range(config["n_samples"])]
             )
             torch.cuda.empty_cache()
@@ -1100,7 +1178,8 @@ if __name__ == '__main__':
             generate_samples(text=config["target_phrase"], max_samples=config["n_samples_val"]-n_current_samples,
                              batch_size=config["tts_batch_size"],
                              noise_scales=noise_scales_val, noise_scale_ws=noise_scale_ws_val, length_scales=length_scales,
-                             output_dir=positive_test_output_dir, auto_reduce_batch_size=True)
+                             output_dir=positive_test_output_dir, auto_reduce_batch_size=True,
+                             speaker_ids=positive_speaker_ids)
             torch.cuda.empty_cache()
         else:
             logging.warning(f"Skipping generation of positive clips testing, as ~{config['n_samples_val']} already exist")
@@ -1119,7 +1198,10 @@ if __name__ == '__main__':
         }.keys())
 
         if n_current_samples <= 0.95*config["n_samples"]:
-            adversarial_texts = config["custom_negative_phrases"]
+            # Copy, don't alias: .extend() below would otherwise mutate the
+            # config list in place, so the test block would re-read a list
+            # already holding every train adversarial → train/test leakage.
+            adversarial_texts = list(config["custom_negative_phrases"])
             for target_phrase in adv_input_phrases:
                 adversarial_texts.extend(generate_adversarial_texts(
                     input_text=target_phrase,
@@ -1148,7 +1230,10 @@ if __name__ == '__main__':
             os.mkdir(negative_test_output_dir)
         n_current_samples = len(os.listdir(negative_test_output_dir))
         if n_current_samples <= 0.95*config["n_samples_val"]:
-            adversarial_texts = config["custom_negative_phrases"]
+            # Copy, don't alias: .extend() below would otherwise mutate the
+            # config list in place, so the test block would re-read a list
+            # already holding every train adversarial → train/test leakage.
+            adversarial_texts = list(config["custom_negative_phrases"])
             for target_phrase in adv_input_phrases:
                 adversarial_texts.extend(generate_adversarial_texts(
                     input_text=target_phrase,
@@ -1237,25 +1322,28 @@ if __name__ == '__main__':
                 n_cpus = 1
             else:
                 n_cpus = n_cpus//2
-            compute_features_from_generator(positive_clips_train_generator, n_total=len(os.listdir(positive_train_output_dir)),
+            # n_total must match what the generator yields (clips * augmentation_rounds),
+            # not the on-disk file count — else compute_features stops after one round
+            # and augmentation_rounds > 1 is silently a no-op.
+            compute_features_from_generator(positive_clips_train_generator, n_total=len(positive_clips_train),
                                             clip_duration=config["total_length"],
                                             output_file=os.path.join(feature_save_dir, "positive_features_train.npy"),
                                             device="gpu" if torch.cuda.is_available() else "cpu",
                                             ncpu=n_cpus if not torch.cuda.is_available() else 1)
 
-            compute_features_from_generator(negative_clips_train_generator, n_total=len(os.listdir(negative_train_output_dir)),
+            compute_features_from_generator(negative_clips_train_generator, n_total=len(negative_clips_train),
                                             clip_duration=config["total_length"],
                                             output_file=os.path.join(feature_save_dir, "negative_features_train.npy"),
                                             device="gpu" if torch.cuda.is_available() else "cpu",
                                             ncpu=n_cpus if not torch.cuda.is_available() else 1)
 
-            compute_features_from_generator(positive_clips_test_generator, n_total=len(os.listdir(positive_test_output_dir)),
+            compute_features_from_generator(positive_clips_test_generator, n_total=len(positive_clips_test),
                                             clip_duration=config["total_length"],
                                             output_file=os.path.join(feature_save_dir, "positive_features_test.npy"),
                                             device="gpu" if torch.cuda.is_available() else "cpu",
                                             ncpu=n_cpus if not torch.cuda.is_available() else 1)
 
-            compute_features_from_generator(negative_clips_test_generator, n_total=len(os.listdir(negative_test_output_dir)),
+            compute_features_from_generator(negative_clips_test_generator, n_total=len(negative_clips_test),
                                             clip_duration=config["total_length"],
                                             output_file=os.path.join(feature_save_dir, "negative_features_test.npy"),
                                             device="gpu" if torch.cuda.is_available() else "cpu",

@@ -127,6 +127,22 @@ if [[ "$DOWNLOAD_PIPER" == "1" ]]; then
         wget -q --show-progress -O "$PIPER_VOICE" \
             "https://github.com/rhasspy/piper-sample-generator/releases/download/v1.0.0/en-us-libritts-high.pt"
     fi
+
+    # Patch generate_samples.py to accept a gender-weighted speaker pool
+    # (speaker_ids=). The libritts voice pool is only ~12% female-range, so the
+    # unpatched generator under-fires the trained model for women. The repo
+    # holds the change as a tracked patch (and the per-voice F0 map needed to
+    # build the pool comes from scripts/measure_speaker_f0.py). Idempotent:
+    # skipped if the clone already carries the param.
+    PIPER_PATCH="$REPO_ROOT/patches/piper_speaker_ids.patch"
+    if [[ -f "$PIPER_PATCH" ]]; then
+        if grep -q "speaker_ids" "$PIPER_DIR/generate_samples.py"; then
+            echo "    [skip] generate_samples.py already patched (speaker_ids present)"
+        else
+            echo "==> Patching generate_samples.py (gender-weighted speaker pool)"
+            patch -p1 -d "$PIPER_DIR" < "$PIPER_PATCH"
+        fi
+    fi
 fi
 
 # 5. Pre-computed negative features (~7 GB) ---------------------------------
